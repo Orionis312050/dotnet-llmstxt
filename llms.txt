@@ -1,0 +1,1851 @@
+# Teams SDK - C# Documentation (Complete, offline)
+
+> Microsoft Teams SDK - A comprehensive framework for building AI-powered Teams applications using C#. Using this SDK, you can easily build and integrate a variety of features in Microsoft Teams by building Agents or Tools. The documentation here helps by giving background information and code samples on how best to do this.
+
+IMPORTANT THINGS TO REMEMBER:
+- This SDK is NOT based off of BotFramework (which the _previous_ version of the Teams SDK was based on). This SDK is a completely new framework. Use this guide to find snippets to drive your decisions.
+- When scaffolding new applications, using the CLI is a lot simpler and preferred than doing it by yourself. See the Quickstart guide for that.
+- It's a good idea to build the application and fix compile time errors to help ensure the app works as expected.
+- It is helpful to inspect NuGet packages folder to get exact types for a given namesapce
+
+YOU MUST FOLLOW THE ABOVE GUIDANCE.
+
+> Offline edition of https://microsoft.github.io/teams-sdk/llms_docs/llms_csharp_full.txt: every internal documentation link has been replaced by an in-file anchor (`#section`) pointing to the corresponding section below. No external fetching is required. External reference links (learn.microsoft.com, github.com, ...) are kept as plain references.
+
+## Main Documentation
+
+### Client Secret Authentication Setup
+
+# Client Secret Authentication Setup
+
+Client Secret authentication is the simplest method, using a password-like secret to authenticate your bot. While easy to set up, secrets need to be rotated periodically and kept secure.
+
+## Prerequisites
+
+Before you begin, ensure you have:
+- An Azure subscription
+- Permissions to create App Registrations and Azure Bot Services
+
+## Setup Steps
+
+### Step 1: Create Azure Bot with Single Tenant
+
+When creating your Azure Bot Service, you must select `Single Tenant` for the `Type of App`.
+
+![Single Tenant Bot Creation](/screenshots/single-tenant-bot.png)
+
+### Step 2: Create Client Secret
+
+**Azure Portal:**
+
+1. Navigate to your **App Registration** in the Azure Portal
+2. Go to **Certificates and Secrets**
+3. Click **New client secret**
+4. Add a description and select an expiration period
+5. Click **Add**
+6. **Important**: Copy the secret value immediately - it won't be shown again
+
+![Secret in Certificates and Secrets](#client-secret-authentication-setup)
+
+**Azure CLI:**
+
+```bash
+# Create a new client secret
+az ad app credential reset --id $APP_ID --append
+```
+
+The command will output the secret value. Save it securely.
+
+## Next Steps
+
+After completing the Azure setup, configure your application code with the appropriate environment variables. See the App Authentication Essentials Guide for details.
+
+---
+
+### Quickstart: Register your app
+
+# Quickstart: Register your app
+
+Register a Teams app and its bot infrastructure with the [Teams Developer CLI](/cli/) (`@microsoft/teams.cli`). At the end you'll have a running agent installed in Teams.
+
+If you don't have an agent yet, step 3 scaffolds one using the Teams SDK. If you already have a server, skip step 3 and pass your endpoint to step 4.
+
+:::tip Let your AI assistant do this for you
+Install the [`teams-dev` skill](#agent-skills) in Claude Code, GitHub Copilot, Cursor, or VS Code, then say _"create a Teams bot"_ — your assistant runs every step on this page for you, including the tunnel setup and sideload link.
+:::
+
+## Prerequisites
+
+- Node.js 22.12 or later
+- An M365 account with **custom app upload (sideloading) enabled** on the tenant. Step 2 will check this.
+- A public HTTPS tunnel pointing at your local server (e.g. [DevTunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview), [ngrok](https://ngrok.com/)). Start it before step 4 — see [Local Tunnels](#exposing-your-local-app-with-a-tunnel) if you need setup steps.
+
+## 1. Install the CLI
+
+```bash
+npm install -g @microsoft/teams.cli
+teams --version
+```
+
+## 2. Log in
+
+```bash
+teams login
+teams status
+```
+
+`teams status` should show `Sideloading: enabled`. If it shows `disabled`, your tenant admin needs to enable [custom app upload](https://learn.microsoft.com/en-us/microsoftteams/teams-custom-app-policies-and-settings) before you can install your bot.
+
+## 3. Scaffold a project
+
+Skip this step if you're bringing your own server endpoint.
+
+**TypeScript:**
+
+```bash
+teams project new typescript echo-bot
+cd echo-bot
+```
+
+**C#:**
+
+```bash
+teams project new csharp echo-bot
+cd Echo.Bot/Echo.Bot
+```
+
+**Python:**
+
+```bash
+teams project new python echo-bot
+cd echo-bot
+```
+
+The default template is `echo`. Run `teams project new <language> --help` to see other templates available for your language.
+
+## 4. Register bot infrastructure
+
+:::note Start your tunnel first
+Teams must reach your bot over **public HTTPS** — your `localhost` port isn't reachable from Teams' servers. Before running the command below, start a tunnel (e.g. [DevTunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview) or [ngrok](https://ngrok.com/)) and replace `<tunnel-host>` with the hostname it gives you.
+
+Learn more: [Local Tunnels](#exposing-your-local-app-with-a-tunnel)
+:::
+
+Run from inside your project directory:
+
+**TypeScript:**
+
+```bash
+teams app create \
+  --name echo-bot \
+  --endpoint https://<tunnel-host>/api/messages \
+  --env .env
+```
+
+**C#:**
+
+```bash
+teams app create \
+  --name echo-bot \
+  --endpoint https://<tunnel-host>/api/messages \
+  --env appsettings.json
+```
+
+**Python:**
+
+```bash
+teams app create \
+  --name echo-bot \
+  --endpoint https://<tunnel-host>/api/messages \
+  --env .env
+```
+
+The command prints a summary including the **Teams App ID** and an **Install in Teams** link, and writes credentials into your env file.
+
+## 5. Run your agent
+
+**TypeScript:**
+
+```bash
+npm install
+npm run dev
+```
+
+**C#:**
+
+```bash
+dotnet run
+```
+
+**Python:**
+
+```bash
+pip install -e .
+python src/main.py
+```
+
+You should see `listening on port 3978 🚀` in the terminal. Your tunnel will now forward Teams traffic to your local server.
+
+## 6. Install in Teams
+
+The **Install in Teams** link from step 4 is your sideload URL. Click it from a browser signed in to Teams, then **Add**.
+
+If you closed the terminal and need the link again:
+
+```bash
+teams app get <teamsAppId> --install-link
+```
+
+Use the `Teams App ID` printed in step 4. (Run `teams app list` to see all your apps with IDs.)
+
+Send your bot a message to confirm it's working.
+
+## What's next
+
+- [Quickstart: Build your first bot](#quickstart-build-your-first-bot) — wire up handlers and reply logic
+- [Agent Skills](#agent-skills) — let your AI coding assistant run this whole flow for you
+- [CLI command reference](/cli/commands/) — every flag, every subcommand
+
+---
+
+### SSO Setup
+
+# SSO Setup
+
+This section describes how to configure the Azure Bot Service (ABS), the Entra App Registration and the Teams manifest to enable Single-Sign-On (SSO) for your Teams app.
+
+:::tip Let an AI assistant run this for you
+The [`teams-dev` skill](#agent-skills) can orchestrate the full SSO setup for you — install it in your AI coding assistant and say *"set up SSO for my Teams bot"*.
+:::
+
+## Prerequisites
+
+Before starting SSO configuration, ensure you have:
+
+- An **Azure-managed** Azure Bot Service resource and its associated Entra App Registration (Application ID / Client ID and Tenant ID).
+- To set up using CLIs: the [`az` CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) and the [Teams Developer CLI](/cli/getting-started/installation) installed and authenticated.
+
+  :::note CLI users: migrate first if your bot is Teams-managed
+  SSO requires an Azure-managed bot because the OAuth connection lives in Azure Bot Service. If you registered with `teams app create` (default Teams-managed), migrate your bot first:
+
+  ```bash
+  teams app bot migrate <appId> --subscription <id> --resource-group <rg>
+  ```
+
+  Your `CLIENT_ID`, `CLIENT_SECRET`, and `TENANT_ID` stay the same. See [Bot Locations](/cli/concepts/bot-locations) for details.
+  :::
+
+## SSO with User-Assigned Managed Identity
+
+If your bot uses **User-Assigned Managed Identity (MI)** authentication, the bot ID is the MI's client ID. Since managed identities don't have client secrets, you need a **separate Entra App Registration** for the OAuth connection used in SSO. In this setup, the IDs map differently:
+
+| Configuration | Value |
+|---------------|-------|
+| Application ID URI (Expose an API) | `api://botid-botId` (where `botId` = MI client ID) |
+| `webApplicationInfo.id` in manifest | The **auth app's** client ID (not the bot/MI ID) |
+| `webApplicationInfo.resource` in manifest | `api://botid-botId` (must match the Application ID URI) |
+| OAuth connection `ClientId` / `ClientSecret` | From the **auth app** registration |
+| OAuth connection `tokenExchangeUrl` | `api://botid-botId` (must match the Application ID URI) |
+
+:::caution
+The Application ID URI on the auth app must use the **bot ID** (MI client ID), not the auth app's own client ID. Teams requires the `botid-` prefix format and matches this URI across the manifest, OAuth connection, and Entra app registration.
+:::
+
+## Configure the Entra App Registration for SSO
+
+You need an Entra ID App Registration to configure the OAuth Connection in Azure Bot Service. If you don't already have one, follow the [Create the Entra App Registration](#azure-configuration) guide first.
+
+**Azure Portal:**
+
+1. Add the Bot Framework redirect URI. From your App Registration, navigate to **Authentication** and add a **Web** platform redirect URI with the value `https://token.botframework.com/.auth/web/redirect`
+
+![Entra auth redirect](/screenshots/entra-auth-redirect.png)
+
+2. Configure the API. From `Expose an API`, click `Add` to Application ID URI and set the value to `api://`. Add the scope `access_as_user` and select who can _consent_.
+
+![Entra oauth scopes](/screenshots/entra-oauth-scopes.png)
+
+3. Authorize the client applications for SSO. To enable the Teams clients, desktop and web, to perform the SSO flow you must add the following client applications to the scope defined before: Teams Desktop `1fec8e78-bce4-4aaf-ab1b-5451cc387264` and Teams Web `5e3ce6c0-2b1f-4285-8d4b-75ee78787346`
+
+![Entra oauth authorize client app](/screenshots/entra-authorize-clientapp.png)
+
+**Azure CLI:**
+
+The full SSO setup involves several steps the Teams Developer CLI doesn't handle directly (creating the `access_as_user` scope, pre-authorizing Teams clients, configuring the OAuth connection in Azure Bot Service, updating `webApplicationInfo` in the manifest). The [`teams-dev` skill](#agent-skills) orchestrates all of this for you — install it in your AI coding assistant and say *"set up SSO for my Teams bot"*.
+
+### Step 1: Look Up the AAD App Object ID
+
+The Microsoft Graph object ID differs from the app's Client ID. Query it using the `az` CLI:
+
+```bash
+az rest \
+  --method GET \
+  --uri "https://graph.microsoft.com/v1.0/applications?\$filter=appId eq '$appId'" \
+  --query "value[0].id" \
+  --output tsv
+```
+
+Save the result as your `objectId`.
+
+### Step 2: Generate a Scope UUID
+
+The `access_as_user` scope needs a stable unique identifier. Generate one with PowerShell, bash, or any UUID tool:
+
+```bash
+# PowerShell
+[guid]::NewGuid().ToString()
+
+# bash / macOS / Linux
+uuidgen
+```
+
+Save the result as your `scopeId`.
+
+### Step 3: Configure the AAD App (Identifier URI, Scope, Redirect URI)
+
+Substitute your `appId` and `scopeId` into the following command:
+
+```bash
+az rest \
+  --method PATCH \
+  --uri "https://graph.microsoft.com/v1.0/applications/$objectId" \
+  --headers "Content-Type:application/json" \
+  --body "{
+    \"identifierUris\": [\"api://botid-$appId\"],
+    \"api\": {
+      \"requestedAccessTokenVersion\": 2,
+      \"oauth2PermissionScopes\": [{
+        \"id\": \"$scopeId\",
+        \"adminConsentDescription\": \"Allow the application to access the bot on behalf of the signed-in user.\",
+        \"adminConsentDisplayName\": \"Access as user\",
+        \"userConsentDescription\": \"Allow the application to access the bot on your behalf.\",
+        \"userConsentDisplayName\": \"Access as user\",
+        \"isEnabled\": true,
+        \"type\": \"User\",
+        \"value\": \"access_as_user\"
+      }]
+    },
+    \"web\": {
+      \"redirectUris\": [\"https://token.botframework.com/.auth/web/redirect\"]
+    }
+  }"
+```
+
+### Step 4: Pre-Authorize Teams Clients
+
+Pre-authorize the Teams desktop and web clients so they can silently acquire SSO tokens. Substitute your `scopeId`:
+
+```bash
+az rest \
+  --method PATCH \
+  --uri "https://graph.microsoft.com/v1.0/applications/$objectId" \
+  --headers "Content-Type:application/json" \
+  --body "{
+    \"api\": {
+      \"oauth2PermissionScopes\": [{
+        \"id\": \"$scopeId\",
+        \"adminConsentDescription\": \"Allow the application to access the bot on behalf of the signed-in user.\",
+        \"adminConsentDisplayName\": \"Access as user\",
+        \"userConsentDescription\": \"Allow the application to access the bot on your behalf.\",
+        \"userConsentDisplayName\": \"Access as user\",
+        \"isEnabled\": true,
+        \"type\": \"User\",
+        \"value\": \"access_as_user\"
+      }],
+      \"preAuthorizedApplications\": [
+        {
+          \"appId\": \"1fec8e78-bce4-4aaf-ab1b-5451cc387264\",
+          \"delegatedPermissionIds\": [\"$scopeId\"]
+        },
+        {
+          \"appId\": \"5e3ce6c0-2b1f-4285-8d4b-75ee78787346\",
+          \"delegatedPermissionIds\": [\"$scopeId\"]
+        }
+      ]
+    }
+  }"
+```
+
+:::note
+The pre-authorization patch must run after the scope patch because the pre-authorized apps reference the `scopeId`, which must exist first. If it fails with a scope-not-found error, wait 15 seconds (AAD replication lag) and retry.
+:::
+
+## Create the OAuth connection in Azure Bot Service
+
+You need to add a new OAuth connection to your Azure Bot Service resource.
+
+**Azure Portal:**
+
+1. From the Bot service resource in the Azure Portal, navigate to `Settings/Configuration` and `Add OAuth Connection settings`.
+2. Provide a name for your connection e.g. `graph`, and select the _Service Provider_ `Azure Active Directory v2`
+3. Populate the `TenantId`/`ClientId`/`ClientSecret` from the values obtained in the previous section. Configure the Token Exchange URL with the Application ID URI (e.g. `api://`), and add the Scopes you need e.g. `User.Read`
+
+![ABS OAuth connection](/screenshots/abs-oauth-connection.png)
+
+**Azure CLI:**
+
+Use the `az bot authsetting create` command to create the OAuth connection. The `--setting-name` is the OAuth connection name — `"graph"` is used here as an example since Microsoft Graph is the most common scenario. Replace the other placeholders with your values:
+
+```bash
+az bot authsetting create \
+  --resource-group $resourceGroup \
+  --name $botName \
+  --setting-name "graph" \
+  --client-id $appId \
+  --client-secret $clientSecret \
+  --provider-scope-string "User.Read" \
+  --service "Aadv2" \
+  --parameters tenantId=$tenantId tokenExchangeUrl=api://botid-$appId
+```
+
+:::tip
+To include additional permissions (Graph, SharePoint, etc.), space-delimit them: `"User.Read Mail.Read Sites.Read.All"`.
+:::
+
+## Configure the App Manifest
+
+The Teams application manifest needs to be updated to include `webApplicationInfo` with the `Application Id` and `Application ID URI`.
+
+**Manifest JSON:**
+
+Add `*.botframework.com` to `validDomains` and add the `webApplicationInfo` section to your `manifest.json`:
+
+```json
+"validDomains": [
+    ...
+    // highlight-next-line
+    "*.botframework.com"
+ ],
+ // highlight-start
+ "webApplicationInfo": {
+    "id": "",
+    "resource": "api://"
+  }
+ // highlight-end
+```
+
+**Teams Developer CLI:**
+
+:::note
+This option is available if your app was created using the Teams Developer CLI.
+:::
+
+You can set the `webApplicationInfo` fields directly without downloading and re-uploading the manifest:
+
+```bash
+teams app update $teamsAppId \
+  --web-app-info-id "$appId" \
+  --web-app-info-resource "api://botid-$appId"
+```
+
+You can then verify the full SSO configuration with the doctor command:
+
+```bash
+teams app doctor $teamsAppId
+```
+
+Expected — all SSO checks pass:
+- Identifier URI: `api://botid-<appId>` ✔
+- `access_as_user` scope ✔
+- Teams clients pre-authorized ✔
+- Bot Framework redirect URI present ✔
+- OAuth connection — URIs aligned ✔
+
+## Cross-Tenant Considerations
+
+If your Entra auth app lives in a different tenant than where the Teams app is installed, see [Cross-Tenant Considerations](#sso-troubleshooting) in the troubleshooting guide.
+
+## Troubleshooting
+
+If you encounter SSO errors, see the [Troubleshooting](#sso-troubleshooting) guide for common issues and solutions.
+
+---
+
+### Teams Core Concepts
+
+# Teams Core Concepts
+
+Running an agent on Teams involves several moving pieces — an app registration, an Azure or Teams-managed bot, a public messaging endpoint, and a sideloaded app package. Understanding these components helps you debug and deploy your agent confidently. The [Teams Developer CLI](/cli/) automates all of them with a single `teams app create` command, but it's worth knowing what it sets up underneath.
+
+## Basic Flow
+
+```mermaid
+flowchart LR
+    %% Main actors
+    User([User])
+
+    %% Teams section
+    subgraph Teams ["Teams"]
+        TeamsClient["Teams Client"]
+        TeamsBackend["Teams Backend"]
+    end
+
+    %% Azure section
+    subgraph Azure ["Azure"]
+        AppReg["App Registration"]
+        AzureBot["Azure Bot"]
+    end
+
+    %% Local Server section
+    subgraph LocalServer ["Local Server"]
+        DevTunnel["DevTunnel"]
+        LocalApp["Your local application"]
+    end
+
+    %% Deployed Server section
+    subgraph DeployedServer ["Deployed Server"]
+        DeployedApp["Your deployed application"]
+    end
+
+    %% Define connections
+    User <--> TeamsClient
+    TeamsClient <--> TeamsBackend
+    TeamsBackend <--> AppReg
+    AppReg <--> AzureBot
+    AzureBot --> LocalServer
+    AzureBot --> DeployedServer
+```
+
+**Teams**
+
+- Teams Client: User-facing agent that interacts with the user.
+- Teams Backend: Part of your app package; includes a manifest with your app’s client ID.
+
+**Azure**
+
+- App Registration: Contains a unique client ID and secret for your app.
+- Azure Bot: Connects your app to Teams; contains a pointer to your HTTPS URL.
+
+**Local Server**
+
+- Dev Tunnel: Public-facing HTTPS tunnel to expose your local machine.
+- Local App: Your application running locally; handles events from Teams and sends responses.
+
+**Deployed Server**
+
+- Deployed App: Your app deployed to the cloud with a public HTTPS endpoint; also interacts with Teams.
+
+## Core Concepts
+
+When working with Teams, these are the key concepts. Keep in mind, this is a simplified view of the architecture.
+
+- Teams Client: This is the Teams application where users interact with your agent. This can be the desktop app, web app, or mobile app.
+- Teams Backend: This service handles all the Teams-related operations, including keeping a record of your manifest, and routing messages from your agent to the Azure bot service.
+- App Registration: This is the registration of your agent in Azure. This Application Registration issues a unique client ID for your application and a client secret. This is used to authenticate your agent application with the Teams backend and other Azure services (including Graph if you are using it).
+- Azure Bot Service: This is the service that handles all the bot-related operations, including routing messages from Teams to your agent and vice versa. This holds the URL to your agent application.
+- DevTunnel: This is a service that creates a public facing URL to your locally running application. Azure Bot Service requires that you have a public facing https URL to your agent application.
+- Local Agent Application: This is your agent application running on your local machine.
+- Deployed Agent Application: This is your deployed agent which probably has a public facing URL.
+
+## DevTunnel
+
+[DevTunnel](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview) is a critical component that makes your locally running agent accessible to Teams: it creates a secure public HTTPS endpoint that forwards to your local server so Teams can route messages and events to it. DevTunnel is only one way to do this — ngrok works too.
+
+For setup steps, the plain-HTTP protocol gotcha, verification, and security notes, see [Local Tunnels](#exposing-your-local-app-with-a-tunnel).
+
+## Teams App Provisioning
+
+Before your agent can interact with Teams, it needs to be properly registered and configured. This step handles creating or updating the App Registration and creating or registering the Azure Bot instance in Azure.
+
+### App Registration
+
+- Creates an App ID (i.e. Client ID) in the Teams platform
+- Sets up a bot registration with the Bot Framework
+- Creates a client secret that your agent can use to authenticate to send and receive messages. The [Teams Developer CLI](/cli/) writes this value to `.env` (or `appsettings.json` for C#) automatically when you run `teams app create`.
+
+### Azure Bot
+
+- Creates an Azure Bot resource (with `--azure`) or a Teams-managed bot registration (default)
+- Associates the bot with your App Registration
+- Configures the messaging endpoint to point to your DevTunnel (or public URL if deployed)
+
+## Sideloading Process
+
+Sideloading is the process of installing your agent in Teams. You are able to pass in the manifest and icons (zipped up) to the Teams client. Sideloading an application automatically makes that application available to you. You are also able to sideload the application in a Team or a Group chat. In this case, the application will be available to all members of that Team or Group chat.
+
+:::warning
+Sideloading needs to be enabled in your tenant. If this is not the case, then you will need to contact your Teams administrator to enable it.
+:::
+
+## Provisioning and Deployment
+
+To test your app in Teams you need, at minimum, a provisioned bot. You'll likely also have other resources such as storage.
+
+The fastest path is `teams app create`, which provisions a Teams-managed bot by default — no Azure subscription required. See the [Quickstart: Register your app](#quickstart-register-your-app).
+
+If you need OAuth or SSO (typically for delegated Microsoft Graph access on behalf of a user), the bot must be Azure-managed. Either start with `teams app create --azure --subscription <id> --resource-group <rg>`, or start Teams-managed and switch later with `teams app bot migrate <appId> --subscription <id> --resource-group <rg>` (both require an Azure subscription) — your `CLIENT_ID`, `CLIENT_SECRET`, and `TENANT_ID` stay the same. For a hand-rolled Azure setup, follow the [Azure Configuration](#azure-configuration) guide.
+
+For deploying your bot's endpoint to App Service, Container Apps, or other Azure compute, see the Microsoft Learn [deployment overview](https://learn.microsoft.com/en-us/microsoftteams/deploy-overview).
+
+---
+
+### Teams Developer CLI
+
+# Teams Developer CLI
+
+The Teams Developer CLI documentation has moved to its own section.
+
+**[Go to CLI Documentation](#teams-developer-cli)**
+
+---
+
+### Agent Skills
+
+# Agent Skills
+
+[Agent Skills](https://aka.ms/teams-agent-skills) give AI coding assistants relevant context for specific development tasks. The `teams-dev` skill is the go-to agent skill for Teams bot development. It gives AI coding assistants (Claude Code, Cursor, GitHub Copilot, and others) relevant context to assist in developing Teams bots and use the Teams Developer CLI to manage your bot infrastructure. Instead of running CLI commands manually, you describe what you want and your AI assistant handles the rest.
+
+:::note Alternative: Use llms.txt directly
+If you'd rather not install a skill, you can provide the same context by pointing your AI tool to the llms.txt URL:
+
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms.txt
+```
+
+:::
+
+## Install the `teams-dev` skill
+
+**GitHub Copilot CLI:**
+
+Add the marketplace (first time only):
+
+```
+/plugin marketplace add microsoft/teams-sdk
+```
+
+Install the skill:
+
+```
+/plugin install teams-sdk@teams-skills
+```
+
+After installing, restart GitHub Copilot for the skills to load.
+
+**Claude Code:**
+
+Add the marketplace (first time only):
+
+```
+/plugin marketplace add microsoft/teams-sdk
+```
+
+Install the skill:
+
+```
+/plugin install teams-sdk@teams-skills
+```
+
+After installing, restart Claude Code for the skills to load.
+
+**VS Code:**
+
+See [VS Code Agent Skills documentation](https://code.visualstudio.com/docs/copilot/customization/agent-skills#_use-shared-skills) for installation instructions.
+
+**Cursor:**
+
+See [Cursor Skills documentation](https://cursor.com/docs/skills#installing-skills-from-github) for installation instructions.
+
+## What the skill covers
+
+The `teams-dev` skill guides your AI assistant through:
+
+| Task                          | What it does                                                                      |
+| ----------------------------- | --------------------------------------------------------------------------------- |
+| **Manage bot infrastructure** | Register your bot with Teams, manage credentials, and update configuration        |
+| **Develop Teams bot**         | Build bot applications from scratch or add Teams capabilities to existing servers |
+| **Set up SSO**                | Enable Single Sign-On so users can authenticate seamlessly without login prompts  |
+| **Troubleshoot**              | Diagnose and resolve common bot setup and configuration issues                    |
+
+The skill does **not** cover hosting or deployment — it focuses on bot registration, development, and configuration.
+
+## Invoke the skill
+
+**Using natural language:**
+
+- "I need a chatbot for my team's standup meetings"
+- "Help me build a Teams bot that can answer FAQs"
+- "My bot won't load in Teams, can you help?"
+- "Add the ability to get user profile information to my bot"
+
+The skill loads automatically when your agent detects a relevant request.
+
+**Direct invocation:**
+
+```
+/teams-dev
+```
+
+## Example session
+
+```
+You: Help me create a Teams bot that echoes what I'm saying back to me
+
+Agent: I'll create an echo bot for you.
+
+       [checks Teams Developer CLI installation and authentication]
+       [creates development tunnel: https://abc123.ngrok.io]
+       [runs teams app create with endpoint]
+       ✓ Bot registered, credentials saved to .env
+
+       [runs teams project new typescript echo-bot -t echo]
+       ✓ Bot code created in ./echo-bot
+
+       [installs dependencies and starts bot server]
+       ✓ Bot running at http://localhost:3978
+
+       Your bot is ready! Install it in Teams:
+       https://teams.microsoft.com/l/app/[app-id]
+```
+
+## Requirements
+
+- Teams Developer CLI installed (`npm install -g @microsoft/teams.cli`)
+- Node.js 22.12 or later
+- Microsoft 365 account with sideloading enabled
+
+---
+
+### Quickstart: Build your first bot
+
+# Quickstart: Build your first bot
+
+Write a bot that responds to messages in Teams using the Teams SDK. Pick your language below.
+
+:::tip
+If you haven't registered your Teams app yet, start with [Quickstart: Register your app](#quickstart-register-your-app) — you'll need the credentials before this code can talk to Teams.
+:::
+
+## Pick your language
+
+**TypeScript:**
+
+If you scaffolded with `teams project new typescript`, your `src/index.ts` already looks like this:
+
+```typescript
+
+const app = new App();
+
+app.on('message', async ({ send, activity }) => {
+  await send({ type: 'typing' });
+  await send(`you said "${activity.text}"`);
+});
+
+app.start(process.env.PORT || 3978).catch(console.error);
+```
+
+| Part | Purpose |
+|---|---|
+| `new App()` | Reads credentials from `.env` automatically |
+| `app.on('message', ...)` | Registers a handler for incoming messages |
+| `send( type: 'typing' )` | Shows the typing indicator while you build a reply |
+| `send(...)` | Replies in the same conversation |
+| `app.start(port)` | Starts the HTTP server on the given port |
+
+Run it:
+
+```bash
+npm run dev
+```
+
+Continue with the [TypeScript guide](#quickstart-register-your-app) for events, sending messages, Adaptive Cards, AI, and more.
+
+**C#:**
+
+If you scaffolded with `teams project new csharp`, your `Program.cs` already looks like this:
+
+```csharp
+using Microsoft.Teams.Apps;
+
+WebApplicationBuilder builder = WebApplication.CreateSlimBuilder(args);
+builder.Services.AddTeamsBotApplication();
+WebApplication app = builder.Build();
+
+TeamsBotApplication teams = app.UseTeamsBotApplication();
+
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    await context.TypingAsync(cancellationToken: cancellationToken);
+    await context.SendAsync($"you said '{context.Activity.Text}'", cancellationToken);
+});
+
+app.Run();
+```
+
+Run it:
+
+```bash
+dotnet run
+```
+
+Continue with the [C# guide](#quickstart-register-your-app) for events, sending messages, Adaptive Cards, AI, and more.
+
+**Python:**
+
+If you scaffolded with `teams project new python`, your `src/main.py` already looks like this:
+
+```python
+
+from microsoft_teams.api import MessageActivity, TypingActivityInput
+from microsoft_teams.apps import ActivityContext, App
+
+app = App()
+
+@app.on_message_pattern(re.compile(r"hello|hi|greetings"))
+async def handle_greeting(ctx: ActivityContext[MessageActivity]) -> None:
+    """Handle greeting messages."""
+    await ctx.send("Hello! How can I assist you today?")
+
+@app.on_message
+async def handle_message(ctx: ActivityContext[MessageActivity]):
+    """Handle message activities using the new generated handler system."""
+    await ctx.reply(TypingActivityInput())
+
+    if "reply" in ctx.activity.text.lower():
+        await ctx.reply("Hello! How can I assist you today?")
+    else:
+        await ctx.send(f"You said '{ctx.activity.text}'")
+
+def main():
+    asyncio.run(app.start())
+
+if __name__ == "__main__":
+    main()
+```
+
+The scaffold registers two handlers: `on_message_pattern` for greetings and a fall-through `on_message` for everything else.
+
+Run it:
+
+```bash
+pip install -e .
+python src/main.py
+```
+
+Continue with the [Python guide](#quickstart-register-your-app) for events, sending messages, Adaptive Cards, AI, and more.
+
+## What's next
+
+- **Essentials** — events, activities, sending messages, authentication: [TypeScript](/typescript/essentials) · [C#](/csharp/essentials) · [Python](/python/essentials)
+- **In-depth guides** — Adaptive Cards, AI, MCP, dialogs, tabs, and more: [TypeScript](/typescript/in-depth-guides) · [C#](/csharp/in-depth-guides) · [Python](/python/in-depth-guides)
+- [Quickstart: Register your app](#quickstart-register-your-app) — set up bot infrastructure with the Teams Developer CLI
+
+---
+
+### SSO Troubleshooting
+
+# SSO Troubleshooting
+
+When SSO fails, Teams sends a `signin/failure` invoke activity to your bot with a `code` and `message` describing the error. The SDK's default handler logs a warning with these details.
+
+## Failure codes
+
+| Code | Silent | Description |
+|------|--------|-------------|
+| `installappfailed` | No | Failed to install the app in the user's personal scope (group chat SSO flow). |
+| `authrequestfailed` | No | The SSO auth request failed after app installation. |
+| `installedappnotfound` | Yes | The bot app is not installed for the user or group chat. *(most common)* |
+| `invokeerror` | Yes | A generic error occurred during the SSO invoke flow. |
+| `resourcematchfailed` | Yes | The token exchange resource URI on the OAuthCard does not match the Application ID URI in the Entra app registration's "Expose an API" section. *(common)* |
+| `oauthcardnotvalid` | Yes | The bot's OAuthCard could not be parsed. |
+| `tokenmissing` | Yes | AAD token acquisition failed. |
+
+"Silent" failures produce no user-facing feedback in the Teams client — the user sees nothing and sign-in simply doesn't complete. "Non-silent" failures occur during the group chat SSO flow where the user is shown an install/auth card.
+
+:::note
+The `userconsentrequired` and `interactionrequired` codes are handled by the Teams client via the OAuth card fallback flow and do not typically reach the bot.
+:::
+
+## `authrequestfailed`
+
+If you see:
+
+> Sign-in failed for user "..." in conversation "...": authrequestfailed -- Failed to handle SSO auth request
+
+This can occur in **cross-tenant** scenarios where the Teams app is installed in one tenant but the Entra auth app lives in another. Common causes:
+
+1. **No admin consent in the Teams app's tenant.** Even if the auth app is multi-tenant (`AzureADMultipleOrgs`), admin consent must be granted in the tenant where the Teams app is sideloaded/installed.
+2. **User identity mismatch.** The user signed into Teams is in a different tenant than expected by the auth app. For example, the Teams user is in a dev tenant but the auth app expects users from a production tenant.
+
+To resolve this, either:
+- Grant admin consent for the multi-tenant auth app in the tenant where the Teams app is installed
+- Install the Teams app in the same tenant as the auth app registration
+
+When `authrequestfailed` occurs, Teams falls back to the OAuth card sign-in flow (sign-in button). See [OAuth card fallback and magic code](#oauth-card-fallback-and-magic-code) below.
+
+## OAuth card fallback and magic code
+
+When SSO fails, Teams falls back to the OAuth card flow: the user clicks a sign-in button, authenticates in a popup, and the popup closes automatically once complete. In this normal fallback, no magic code is shown.
+
+However, if the **identity that authenticates in the popup differs from the Teams conversation user** (for example, signing in with a production tenant account while the Teams client is logged in as a dev tenant user), the Token Service cannot match the redirect state. In this case, the popup displays a **6-digit magic code**.
+
+**The magic code flow is expected behavior, not a bug.** To complete it, the user copies the code and pastes it into the chat compose box. The Teams client intercepts the code and routes it as a `signin/verifyState` invoke activity (not a regular message), so your `message` handler is not triggered. The flow is:
+
+1. User pastes the magic code into the compose box and presses Send
+2. Teams sends a `signin/verifyState` invoke activity to your bot with the code
+3. The SDK's built-in handler exchanges the code for a token
+4. The SDK emits a `signin` event
+
+:::caution
+In cross-tenant scenarios where the authenticating identity differs from the Teams session user (for example, signing in with a production tenant account while Teams is logged in as a dev tenant user), the Teams client may not be able to correlate the magic code back to the pending OAuthCard session. In this case, the code arrives as a regular `message` activity instead of a `signin/verifyState` invoke, and the SDK cannot process it. To avoid this, ensure the authenticating identity matches the Teams session, or use one of the options in [Cross-Tenant Considerations](#cross-tenant-considerations) to enable SSO directly.
+:::
+
+**Important:** the `signin()` method in your message handler sends the OAuthCard and returns `undefined` when no cached token exists. It does not wait for the user to complete authentication. To handle the post-sign-in logic, use the `signin` event:
+
+```typescript
+app.on('message', async ({ signin, send }) => {
+  if (!(await signin())) {
+    return; // OAuthCard sent; waiting for auth to complete
+  }
+  await send('You are already signed in!');
+});
+
+// Fires after SSO (tokenExchange) or magic code (verifyState) completes
+app.event('signin', async ({ send }) => {
+  await send('Sign-in complete!');
+});
+```
+
+## Cross-Tenant Considerations
+
+SSO requires the Teams client to silently acquire a token for the resource URI configured in `webApplicationInfo.resource`. This token acquisition happens in the context of the **tenant where the Teams app is installed** (sideloaded or published).
+
+If your Entra auth app lives in a different tenant than where the Teams app is installed:
+
+1. The auth app's `signInAudience` must be set to `AzureADMultipleOrgs` (multi-tenant).
+2. Admin consent for the app must be granted **in the tenant where the Teams app is installed**, not just in the tenant where the app registration lives.
+3. The user signed into Teams must be in a tenant that can reach the auth app.
+
+If these conditions are not met, SSO will silently fail and Teams will fall back to the OAuth card sign-in button. See [OAuth card fallback and magic code](#oauth-card-fallback-and-magic-code) above for details on the fallback behavior.
+
+## `resourcematchfailed`
+
+If you see a warning in your app logs like:
+
+> Sign-in failed for user "..." in conversation "...": resourcematchfailed -- Resource match failed
+
+This means Teams attempted the SSO token exchange but failed because the token exchange resource URI does not match your Entra app registration. To fix this:
+
+1. **Verify "Expose an API"** in your Entra app registration: the Application ID URI must be set (typically `api://`)
+2. **Verify the `access_as_user` scope** is defined under "Expose an API"
+3. **Verify pre-authorized client applications** include the Teams Desktop (`1fec8e78-bce4-4aaf-ab1b-5451cc387264`) and Teams Web (`5e3ce6c0-2b1f-4285-8d4b-75ee78787346`) client IDs
+4. **Verify the Token Exchange URL** in your Azure Bot OAuth connection matches the Application ID URI exactly
+5. **Verify the `webApplicationInfo.resource`** in your Teams app manifest matches the Application ID URI
+
+:::tip
+If you don't need SSO and only want standard OAuth (sign-in button), leave the **Token Exchange URL** blank in your OAuth connection settings.
+:::
+
+To handle `signin/failure` programmatically in your app, see Handling Sign-In Failures in the User Authentication guide.
+
+---
+
+### User Assigned Managed Identity Authentication Setup
+
+# User Assigned Managed Identity Authentication Setup
+
+User Assigned Managed Identity authentication eliminates the need for secrets or passwords. A managed identity is created alongside your bot and assigned to your compute resource (App Service, Container App, VM, etc.).
+
+## Prerequisites
+
+Before you begin, ensure you have:
+- An Azure subscription
+- Permissions to create App Registrations, Azure Bot Services, and manage identities
+- A compute resource where your bot will be hosted (App Service, Container App, VM, etc.)
+
+## Setup Steps
+
+### Step 1: Create Azure Bot with User Assigned Managed Identity
+
+When creating your Azure Bot Service, select `User Assigned Managed Identity` for the `Type of App`.
+
+![User Assigned Managed Identity](/screenshots/umi-auth.png)
+
+This will automatically create a User Assigned Managed Identity resource alongside your bot.
+
+### Step 2: Assign the Managed Identity to Your Compute Resource
+
+The User Assigned Managed Identity created with your bot must be assigned to the service running your application.
+
+**Azure Portal:**
+
+1. Navigate to your compute resource (App Service, Container App, VM, etc.) in the Azure Portal
+2. Go to **Identity** section in the left menu
+3. Select the **User assigned** tab
+4. Click **Add**
+5. Select the User Assigned Managed Identity that was created with your Azure Bot
+6. Click **Add** to confirm
+
+**Azure CLI:**
+
+```bash
+# Assign user managed identity to your compute resource
+# Example for App Service:
+az webapp identity assign \
+  --name $APP_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --identities $MANAGED_IDENTITY_RESOURCE_ID
+
+# Example for Container App:
+az containerapp identity assign \
+  --name $APP_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --user-assigned $MANAGED_IDENTITY_RESOURCE_ID
+```
+
+## Next Steps
+
+After completing the Azure setup, configure your application code with the appropriate environment variables. See the App Authentication Essentials Guide for details.
+
+---
+
+### Azure Configuration
+
+# Azure Configuration
+
+This page walks through creating the Entra App Registration and Azure Bot Service resource by hand. As described in [Core Concepts](#teams-core-concepts), those two pieces are what every Azure-managed Teams bot needs.
+
+:::tip Most readers should use the Teams Developer CLI instead
+For almost everything, `teams app create --azure --subscription <id> --resource-group <rg>` is the right answer — it provisions the Entra app, the Azure Bot resource, the Teams channel, and writes credentials in one command. See the [Quickstart: Register your app](#quickstart-register-your-app).
+
+Or use the [`teams-dev` agent skill](#agent-skills) — tell your AI assistant to set up your Teams bot and it handles everything automatically.
+
+**Use this page when:**
+
+- You have an existing Entra app you can't recreate (and want to point an Azure Bot at it)
+- Your tenant policy requires Azure resources be created with specific naming, tags, or networking the CLI doesn't expose
+- You're working in a locked-down environment where the CLI can't run (e.g., audited CI without Node, restricted service accounts)
+- You want to understand exactly what `teams app create --azure` does under the hood
+:::
+
+## Requirements
+
+1. An Azure subscription
+2. Permissions to create Entra ID App Registrations (if you don't have permissions in your tenant, ask your admin to create the App Registration and share the `Application Id`)
+3. Permissions to create Azure Bot Service resources
+4. (Optional) The [Azure CLI](https://aka.ms/azcli) installed and authenticated to your Azure subscription
+
+## Create the Entra App Registration
+
+After a successful App Registration you'll have the `TenantId`, `ClientId`, and `ClientSecret` values, which you'll use later.
+
+:::tip
+This guide uses Client Secrets. To use other authentication types, see the [App Authentication](#app-authentication-setup) setup guide.
+:::
+
+**Azure Portal:**
+
+1. Navigate to [Entra ID App Registrations](https://portal.azure.com/#view/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/~/RegisteredApps).
+2. Select **New App Registration** and provide a name. Take note of the assigned `Application Id` (also known as `ClientId`) and `TenantId`.
+3. Navigate to **Certificates & secrets** and create a **New client secret**.
+
+**Azure CLI:**
+
+:::note
+The Azure CLI snippets on this page use bash syntax (line continuations with `\\`, command substitution with `$(...)`, `IFS read`). On Windows, run them in **WSL** or **Git Bash**, or adapt to PowerShell (use `` ` `` for line continuations and `$(...)` works the same way).
+:::
+
+```bash
+botName="My App"
+appId=$(az ad app create --display-name "$botName" --sign-in-audience "AzureADMyOrg" --query appId -o tsv)
+az ad sp create --id "$appId"
+IFS=$'\t' read -r tenantId clientSecret <<< "$(az ad app credential reset --id "$appId" --query "[tenant, password]" -o tsv)"
+```
+
+## Create the Azure Bot Service resource
+
+:::tip
+You can create the Azure Bot Service resource and the Entra App Registration from the same screen, then create a new client secret afterward.
+:::
+
+**Azure Portal:**
+
+1. Create or select the resource group where you want to create the Azure Bot resource.
+2. In the resource group, click **Create** and search for `bot`.
+3. Select **Azure Bot** and click **Create**.
+4. Provide the bot handle (for example, `MyBot`), data residency, and pricing tier.
+   1. Under **Microsoft App ID**, select **Single Tenant**.
+   2. In **Creation type**, select **Use existing app registration** and provide the `Application Id` from the previous step.
+
+**Azure CLI:**
+
+This step uses the `resourceGroup`, `tenantId`, and `appId` variables from the previous step.
+
+```bash
+az bot create \
+   --name "$botName" \
+   --app-type SingleTenant \
+   --appid $appId \
+   --tenant-id $tenantId \
+   --resource-group $resourceGroup
+```
+
+## Configure the messaging endpoint
+
+Once the Azure Bot resource exists, point it at your public HTTPS endpoint. Use [DevTunnels or ngrok](#exposing-your-local-app-with-a-tunnel) to expose your local server during development.
+
+**Azure Portal:**
+
+1. Under **Settings → Configuration**, set the **Messaging endpoint** URL.
+   - Local development with DevTunnels: `https://<tunnel-host>/api/messages`
+   - Deployed to App Services / Container Apps / other cloud: `https://<your-host>/api/messages`
+2. Under **Settings → Channels**, enable the **Microsoft Teams** channel.
+
+**Azure CLI:**
+
+```bash
+endpointUrl=<your-public-url>
+az bot update \
+   --name "$botName" \
+   --resource-group $resourceGroup \
+   --endpoint $endpointUrl
+
+az bot msteams create \
+    --name "$botName" \
+    --resource-group $resourceGroup
+```
+
+## Save the credentials
+
+```bash
+echo "TENANT_ID=$tenantId" > .env
+echo "CLIENT_ID=$appId" >> .env
+echo "CLIENT_SECRET=$clientSecret" >> .env
+```
+
+For C# projects, write the credentials to `appsettings.json` under a `Teams` section using PascalCase keys (`ClientId`, `ClientSecret`, `TenantId`).
+
+## Resources
+
+- [Quickstart: Register your app](#quickstart-register-your-app) — automated setup with the Teams Developer CLI
+- [Teams Developer CLI: app create](/cli/commands/app/create)
+- [Teams App Publishing overview](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/apps-publish-overview)
+
+---
+
+### Federated Identity Credentials Setup
+
+# Federated Identity Credentials Setup
+
+Federated Identity Credentials (FIC) allows you to assign managed identities directly to your App Registration instead of creating a separate User Assigned Managed Identity resource.
+
+## Prerequisites
+
+Before you begin, ensure you have:
+- An Azure subscription
+- Permissions to create App Registrations, Azure Bot Services, and manage identities
+- A compute resource where your bot will be hosted (App Service, Container App, VM, etc.)
+- Either a User Assigned Managed Identity or the ability to use System Assigned Identity
+
+## Setup Steps
+
+### Step 1: Create Azure Bot with Single Tenant
+
+When creating your Azure Bot Service, select `Single Tenant` for the `Type of App`.
+
+![Single Tenant Bot Creation](/screenshots/single-tenant-bot.png)
+
+### Step 2: Configure Federated Credentials
+
+Assign managed identities to your App Registration using Federated Credentials.
+
+**Azure Portal:**
+
+1. Navigate to your **App Registration** in the Azure Portal
+2. Go to **Certificates and Secrets**
+3. Select the **Federated Credentials** tab
+4. Click **Add credential**
+5. Select the federated credential scenario (e.g., "Customer managed keys")
+6. Choose the User Assigned Managed Identity or configure for System Assigned Identity
+7. Complete the required fields and click **Add**
+
+![Federated Identity Creds](/screenshots/fic.png)
+
+The identity you select here must also be assigned to the compute resource where your application is hosted.
+
+**Azure CLI:**
+
+```bash
+# Add a federated credential for a user assigned managed identity
+az ad app federated-credential create \
+  --id $APP_ID \
+  --parameters '{
+    "name": "MyFederatedCredential",
+    "issuer": "https://login.microsoftonline.com/'$TENANT_ID'/v2.0",
+    "subject": "'$MANAGED_IDENTITY_CLIENT_ID'",
+    "audiences": ["api://AzureADTokenExchange"]
+  }'
+```
+
+### Step 3: Assign the Managed Identity to Your Compute Resource
+
+The managed identity configured in the federated credential must be assigned to your compute resource.
+
+**Azure Portal:**
+
+**For User Assigned Managed Identity:**
+
+1. Navigate to your compute resource in the Azure Portal
+2. Go to **Identity** section in the left menu
+3. Select the **User assigned** tab
+4. Click **Add**
+5. Select the User Assigned Managed Identity you configured in the federated credential
+6. Click **Add** to confirm
+
+**For System Assigned Identity:**
+
+1. Navigate to your compute resource in the Azure Portal
+2. Go to **Identity** section in the left menu
+3. Select the **System assigned** tab
+4. Set **Status** to **On**
+5. Click **Save**
+
+**Azure CLI:**
+
+```bash
+# For user assigned managed identity:
+az webapp identity assign \
+  --name $APP_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --identities $MANAGED_IDENTITY_RESOURCE_ID
+
+# For system assigned identity:
+az webapp identity assign \
+  --name $APP_NAME \
+  --resource-group $RESOURCE_GROUP
+```
+
+## Next Steps
+
+After completing the Azure setup, configure your application code with the appropriate environment variables. See the App Authentication Essentials Guide for details.
+
+---
+
+### Teams Integration
+
+# Teams Integration
+
+This section describes Teams-specific features and components of the SDK, helping you understand how your agent integrates with the Microsoft Teams platform.
+
+## Core Concepts
+
+When working with Teams, several key components come into play:
+
+- **DevTunnel**: Enables local development by creating secure public endpoints
+- **App Provisioning**: Handles registration and configuration in Teams
+- **Environment Setup**: Manages Teams-specific configuration files
+- **App Packaging**: Bundles your agent for Teams deployment
+
+## In This Section
+
+1. [Core Concepts](#teams-core-concepts) - Understanding the Teams deployment process and architecture
+2. [Teams Manifest](#teams-manifest) - Configuring your agent's Teams presence
+3. [Enabling in M365 Copilot](#enabling-in-m365-copilot) - Make your Teams app available in M365 Copilot
+
+For the manual Azure setup path (existing Entra apps, locked-down environments, custom tenant policies), see [Azure Configuration](#azure-configuration).
+
+Each guide provides detailed information about specific aspects of Teams integration, from local development to production deployment.
+
+---
+
+### llms.txt
+
+# llms.txt
+
+The Teams SDK publishes [llms.txt](https://llmstxt.org) files, plain-text versions of the documentation optimized for AI coding assistants. Point your tool at the right file and it gets the context it needs to help you build Teams apps.
+
+## Available files
+
+### Root
+
+High-level SDK overview with links to reference guides.
+
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms.txt
+```
+
+:::tip
+Instead of manually providing URLs, you can install the [`teams-dev` agent skill](#agent-skills) which automatically gives your coding assistant the right context.
+:::
+
+### Per-language
+
+**TypeScript:**
+
+**Small** — navigation index, the assistant fetches individual pages as needed.
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms_typescript.txt
+```
+
+**Full** — complete documentation in a single file, best for tools with large context windows.
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms_typescript_full.txt
+```
+
+**Python:**
+
+**Small** — navigation index, the assistant fetches individual pages as needed.
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms_python.txt
+```
+
+**Full** — complete documentation in a single file, best for tools with large context windows.
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms_python_full.txt
+```
+
+**C#:**
+
+**Small** — navigation index, the assistant fetches individual pages as needed.
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms_csharp.txt
+```
+
+**Full** — complete documentation in a single file, best for tools with large context windows.
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms_csharp_full.txt
+```
+
+---
+
+### 🎯 Microsoft 365 Agents Playground
+
+# 🎯 Microsoft 365 Agents Playground
+
+The Microsoft 365 Agents Playground is a local testing tool for agents built with the Teams SDK. It lets you chat with your agent, mock activities, and inspect requests and responses without sideloading into Teams.
+
+![Microsoft 365 Agents Playground showing the welcome page with a sidebar listing Personal Chat, Group Chat, and Teams Channels, and a 'Type a message' compose box at the bottom.](/screenshots/agents-playground-blank.png)
+
+## Install
+
+### Option 1: npm (recommended)
+
+```bash
+npm install -g @microsoft/m365agentsplayground
+```
+
+### Option 2: Standalone binary
+
+```bash
+winget install agentsplayground
+```
+
+For other platforms and full install options, see the [Microsoft Learn guide](https://learn.microsoft.com/en-us/microsoft-365/agents-sdk/test-with-toolkit-project).
+
+## Migrating from DevTools
+
+If your agent previously used `DevtoolsPlugin` from `@microsoft/teams.dev`, remove it from your `App` configuration. The Playground is a separate CLI tool and does not need a plugin in your code.
+
+You can also remove `@microsoft/teams.dev` from your `package.json` after deleting `DevtoolsPlugin`. The Playground is installed separately as a CLI tool, not as a project dependency.
+
+The Playground sends requests without a Bot Framework JWT, so your agent needs to accept unauthenticated requests on `/api/messages`.
+
+By default the SDK **rejects** unauthenticated requests, so a freshly scaffolded agent rejects every request the Playground sends and logs:
+
+:::warning
+No credentials configured and dangerouslyAllowUnauthenticatedRequests is not enabled. All incoming requests will be rejected. Configure client authentication to securely receive messages, or set dangerouslyAllowUnauthenticatedRequests: true for local development.
+:::
+
+To accept the Playground's requests during local development, enable unauthenticated requests on your app:
+
+**TypeScript:**
+
+```typescript title="src/index.ts"
+const app = new App({ dangerouslyAllowUnauthenticatedRequests: true });
+```
+
+**C#:**
+
+```json title="Properties/launchSettings.json"
+{
+  "profiles": {
+    "YourBot": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "AzureAd__DangerouslyAllowUnauthenticatedRequests": "true"
+      }
+    }
+  }
+}
+```
+
+**Python:**
+
+```python title="src/main.py"
+app = App(dangerously_allow_unauthenticated_requests=True)
+```
+
+:::warning
+Only enable unauthenticated requests for local development — never in production, as it disables inbound request authentication.
+:::
+
+### Why this is needed
+
+`DevtoolsPlugin` previously bypassed JWT validation implicitly because it ran in-process and never went through `/api/messages` over HTTP. The Playground sends real HTTP requests, so the bot's JWT validator runs unless unauthenticated requests are explicitly enabled.
+
+## Launch
+
+Start your agent locally (default port `3978`), then run:
+
+```bash
+agentsplayground -e http://localhost:3978/api/messages -c msteams
+```
+
+The playground opens at [http://localhost:56150](http://localhost:56150).
+
+### Common flags
+
+- `-e, --app-endpoint` — your agent's endpoint, e.g. `http://localhost:3978/api/messages`
+- `-c, --channel-id` — `emulator`, `webchat`, `msteams`, `directline`, or `agents`
+- `--client-id`, `--client-secret`, `--tenant-id` — credentials when your agent requires authentication
+- `-p, --port` — port for the playground UI (default `56150`)
+
+Run `agentsplayground --help` for the full list.
+
+## Test your agent
+
+Type a message in the compose box and send it. Your agent's reply renders inline.
+
+![Microsoft 365 Agents Playground showing a user message 'hello!' and an agent reply 'you said \"hello!\"'.](/screenshots/agents-playground-echo-chat.png)
+
+Use the **Mock an Activity** menu to send custom activity types (membership changes, invokes, message reactions, and more). Use the **Debug Options** menu to control delivery mode and logging. The **Log Panel** (toggle from the top right) shows the HTTP exchange between the playground and your agent.
+
+## Learn more
+
+- [Test your agent locally in Microsoft 365 Agents Playground](https://learn.microsoft.com/en-us/microsoft-365/agents-sdk/test-with-toolkit-project) — full Microsoft Learn guide
+- [Microsoft 365 Agents SDK](https://learn.microsoft.com/en-us/microsoft-365/agents-sdk/)
+
+---
+
+### App Authentication Setup
+
+# App Authentication Setup
+
+Your Teams bot needs to authenticate with Azure to send messages. This involves configuring your Azure Bot Service and App Registration correctly.
+
+## Authentication Methods
+
+Choose one of the following authentication methods based on your security requirements:
+
+1. **[Client Secret](#client-secret-authentication-setup)** - Simple password-based authentication using a client secret
+2. **[User Assigned Managed Identity](#user-assigned-managed-identity-authentication-setup)** - Passwordless authentication using Azure managed identities
+3. **[Federated Identity Credentials](#federated-identity-credentials-setup)** - Advanced identity federation using managed identities assigned to App Registration
+
+Each method has different setup requirements in Azure Portal or Azure CLI.
+
+## Sovereign Cloud
+
+If your bot runs in a US Government (GCC-High, DoD) or China (21Vianet) cloud environment, see the Sovereign Cloud configuration guide.
+
+## After Setup
+
+Once you've completed the Azure setup for your chosen authentication method, you'll need to configure your application code. See the App Authentication configuration guide for details on environment variables and code configuration.
+
+## Troubleshooting
+
+If you encounter authentication errors, see the [Troubleshooting](troubleshooting) guide for common issues and solutions.
+
+---
+
+### Developer Tools
+
+# Developer Tools
+
+Teams SDK ships with tools that simplify and speed up building and testing agents. Use the Teams Developer CLI to scaffold and manage projects, and the Microsoft 365 Agents Playground to test your agent locally without sideloading into Teams.
+
+1. [Teams Developer CLI](#teams-developer-cli)
+2. [Microsoft 365 Agents Playground](#microsoft-365-agents-playground)
+3. [Local Tunnels](#exposing-your-local-app-with-a-tunnel) — expose your local server publicly for Teams, message extensions, and other webhooks
+4. [Agent Skills](#agent-skills) — give AI coding assistants context for Teams development
+5. [llms.txt](#llmstxt) — documentation files optimized for AI coding assistants
+6. [DevTools](./devtools) (deprecated)
+
+---
+
+### User Authentication
+
+# User Authentication
+
+At times, agents must access secured online resources on behalf of the user, such as checking email, checking flight status, or placing an order. To enable this, the user must authenticate their identity and grant consent for the application to access these resources. This process results in the application receiving a token, which the application can then use to access the permitted resources on the user's behalf.
+
+## How Auth Works
+
+When building Teams applications, choosing the right authentication method is crucial for both security and user experience. Teams supports two primary authentication approaches: OAuth and Single Sign-On (SSO). While both methods serve the same fundamental purpose of validating user identity, they differ significantly in their implementation, supported identity providers, and user experience. Understanding these differences is essential for making the right choice for your application.
+
+The following table provides a clear comparison between OAuth and SSO authentication methods, highlighting their key differences in terms of identity providers, authentication flows, and user experience.
+
+### Single Sign-On (SSO)
+
+Single Sign-On (SSO) in Teams provides a seamless authentication experience by leveraging a user's existing Teams identity. Once a user is logged into Teams, they can access your app without needing to sign in again. The only requirement is a one-time consent from the user, after which your app can securely retrieve their access details from Microsoft Entra ID. This consent is device-agnostic - once granted, users can access your app from any device without additional authentication steps.
+
+When an access token expires, the app automatically initiates a token exchange flow. In this process:
+
+1. The Teams client sends an OAuth ID token containing the user's information
+2. Your app exchanges this ID token for a new access token with the previously consented scopes
+3. This exchange happens silently without requiring user interaction
+
+:::tip
+Always use SSO if you're authenticating the user with Microsoft Entra ID.
+:::
+
+#### The SSO Signin Flow
+
+The SSO signin flow involves several components working together. Here's how it works:
+
+1. User interacts with your bot or message extension app
+2. App initiates the signin process
+3. If it's the first time:
+   - User is shown a consent form for the requested scopes
+   - Upon consent, Microsoft Entra ID issues an access token (in simple terms)
+4. For subsequent interactions:
+   - If token is valid, app uses it directly
+   - If token expires, app silently signs the user in using the token exchange flow
+
+This is what the SSO consent form looks like in Teams:
+
+![SSO Consent Form](/screenshots/auth-consent-popup.png)
+
+### OAuth
+
+You can use a third-party OAuth Identity Provider (IdP) to authenticate your app users. The app user is registered with the identity provider, which has a trust relationship with your app. When the user attempts to log in, the identity provider validates the app user and provides them with access to your app. Microsoft Entra ID is one such third party OAuth provider. You can use other providers, such as Google, Facebook, GitHub, or any other provider.
+
+#### The OAuth Signin Flow
+
+The OAuth signin flow involves several components working together. Here's how it works:
+
+1. User interacts with your bot or message extension app
+2. App sends a sign-in card with a link to the OAuth provider
+3. User clicks the link and is redirected to the provider's authentication page
+4. User authenticates and grants consent for requested scopes
+5. Provider issues an access token to your app (in simple terms)
+6. App uses the token to access services on user's behalf
+
+When an access token expires, the user will need to go through the sign-in process again. Unlike SSO, there is no automatic token exchange - the user must explicitly authenticate each time their token expires.
+
+#### The OAuth Card
+
+This is what the OAuth card looks like in Teams:
+
+![OAuthCard](/screenshots/auth-explicit-signin.png)
+
+## OAuth vs SSO - Head-to-Head Comparison
+
+The following table provides a clear comparison between OAuth and SSO authentication methods, highlighting their key differences in terms of identity providers, authentication flows, and user experience.
+
+| Feature                                                | OAuth                                                                              | SSO                                                                                                                                                                      |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Identity Provider                                      | Works with any OAuth provider (Microsoft Entra ID, Google, Facebook, GitHub, etc.) | Only works with Microsoft Entra ID                                                                                                                                       |
+| Authentication Flow                                | User is sent a card with a sign-in link                                            | If the user has already consented to the requested scopes in the past they will "silently" login through the token exchange flow. Otherwise user is shown a consent form |
+| User Experience                                        | Requires explicit signin, and consent to scopes                                    | Re-use existing Teams credential. Only requires consent to scopes                                                                                                        |
+| Conversation scopes (`personal`, `groupChat`, `teams`) | `personal` scope only                                                              | `personal` scope only                                                                                                                                                    |
+| Azure Configuration differences                        | Same configuration except `Token Exchange URL` is blank                            | Same configuration except `Token Exchange URL` is set                                                                                                                    |
+
+---
+
+### Exposing Your Local App with a Tunnel
+
+# Exposing Your Local App with a Tunnel
+
+Teams, Agent 365, and other webhook callers deliver requests from their own servers, not a browser — so your endpoint must be reachable on the public internet over HTTPS, even while developing on `localhost`. A **tunnel** gives your local server a public URL for exactly this: bots, message extensions, Agent 365 callbacks, and any other inbound webhook your app registers. Once you deploy to a real host, you don't need a tunnel.
+
+## Dev Tunnels (recommended)
+
+[Dev Tunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview) is Microsoft's tunneling service, built into Visual Studio, VS Code, and the Microsoft 365 Agents Toolkit. A **persistent tunnel** keeps the same hostname across restarts, so you register your endpoint once.
+
+**Install:**
+
+```bash
+# macOS / Linux
+brew install devtunnel
+
+# Windows (winget)
+winget install Microsoft.devtunnel
+```
+
+**Create a persistent, anonymous-access tunnel:**
+
+```bash
+devtunnel user login
+devtunnel create my-teams-app --allow-anonymous
+devtunnel port create my-teams-app -p 3978
+devtunnel host my-teams-app
+```
+
+Use the printed public URL (always HTTPS) as your `--endpoint`:
+
+```bash
+teams app create \
+  --name my-bot \
+  --endpoint https://my-teams-app-3978.usw2.devtunnels.ms/api/messages \
+  --env .env
+```
+
+## Alternatives
+
+[ngrok](https://ngrok.com/docs/getting-started) and [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) work the same way: start a tunnel, get a public HTTPS URL, use it as your `--endpoint`. Fine substitutes if you're already using one — see their docs for setup.
+
+## Verifying the tunnel reaches your app
+
+```bash
+curl -i https://<your-tunnel-host>/api/messages
+```
+
+Any response from your app — even an error like `401` or `404` — confirms the tunnel is forwarding correctly; move on and test from Teams. No response or a `502` means transport is broken — see [Troubleshooting](#troubleshooting).
+
+## Persistent vs. ephemeral URLs
+
+A Dev Tunnels persistent tunnel (`devtunnel create <tunnel-id>`) keeps its hostname across restarts, so you register the endpoint once. ngrok's free tier assigns a new hostname every run, so you must re-register (`teams app update <id> --endpoint ...`) each time — and possibly reinstall the app in Teams if the client cached the old endpoint.
+
+:::warning `--allow-anonymous` makes the tunnel public
+Anyone with the URL can reach it — required so Teams (not a Dev Tunnels client) can call your endpoint. It doesn't replace app-level auth: keep JWT/activity validation on, and delete the tunnel (`devtunnel delete <tunnel-id>`) when you're done.
+:::
+
+## Managing a persistent Dev Tunnel
+
+```bash
+devtunnel host my-teams-app       # start (after the one-time create/port setup above)
+# Ctrl+C to stop
+
+devtunnel host my-teams-app       # reuse later — same command, same hostname
+devtunnel delete my-teams-app     # delete when no longer needed
+```
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `502 Bad Gateway` | Tunnel port protocol doesn't match your app | `devtunnel port delete my-teams-app -p 3978`, then `devtunnel port create my-teams-app -p 3978 --protocol http` |
+| Teams can't reach bot / install fails | Tunnel not hosting, or `--endpoint` doesn't match current URL | Confirm `devtunnel host` is running; re-check the registered endpoint |
+| Worked yesterday, not today | Hostname changed (ngrok) or host process stopped | Re-run the host command; re-register the endpoint if the hostname changed |
+| `curl` hangs or times out | Host process isn't running, or wrong port tunneled | Check the port your app actually logged on startup |
+| `curl` works, Teams doesn't | Transport is fine; likely an app-auth issue | See [Authentication Troubleshooting](/teams/app-authentication/troubleshooting) |
+
+## Related pages
+
+- Running in Teams: [TypeScript](/typescript/getting-started/running-in-teams) · [C#](/csharp/getting-started/running-in-teams) · [Python](/python/getting-started/running-in-teams) — end-to-end registration and sideload flow
+- [Local Tunnels (CLI reference)](#exposing-your-local-app-with-a-tunnel) — the same setup via `teams app create`/`update`
+- [Teams Core Concepts](#teams-core-concepts) — where the tunnel fits among app registration and sideloading
+- [Azure Configuration](#azure-configuration) — pointing an Azure Bot resource's messaging endpoint at your tunnel
+
+---
+
+### Teams Manifest
+
+# Teams Manifest
+
+Every app or agent installed on Teams requires an app manifest json file, which provides important information and permissions to that app. When sideloading the app, you are required to provide the app manifest via zip which also includes the icons for the app.
+
+## Manifest
+
+There are many permissions and details that an app manifest may have added to the `manifest.json`, including the app ID, url, and much more. Please review the comprehensive documentation on the [manifest schema](https://learn.microsoft.com/microsoft-365/extensibility/schema/).
+
+## Sideloading
+
+Sideloading is the ability to install and test your app before it is published to your organization's app catalog. For more on sideloading, see [Upload your apps to Teams](https://learn.microsoft.com/microsoftteams/platform/concepts/deploy-and-publish/apps-upload).
+
+To sideload, ensure the manifest includes all required information (such as the app ID, tenant details, and permissions). Place the manifest and icons at the root of a zip file.
+
+The [Teams Developer CLI](/cli/) handles manifest scaffolding, validation, and updates as part of `teams app create`. To work with the manifest directly:
+
+- [`teams app manifest download`](/cli/commands/app/manifest-download) — pull the current manifest from a registered app
+- [`teams app manifest upload`](/cli/commands/app/manifest-upload) — apply a local manifest.json to an existing app
+- [`teams app package download`](/cli/commands/app/package-download) — get a sideload-ready zip (manifest + icons)
+
+---
+
+### Enabling in M365 Copilot
+
+# Enabling in M365 Copilot
+
+If you've built a Teams app or agent and want to make it available in M365 Copilot, you can do so with a single CLI command that handles the manifest update automatically.
+
+## Using the Teams Developer CLI
+
+```bash
+teams app update <appId> --scopes personal,team,copilot
+```
+
+This command:
+- Adds `copilot` to the bot's scope list (and ensures `personal` is included — required by M365 Copilot)
+- Adds the `copilotAgents.customEngineAgents` block to the manifest automatically
+- Bumps the app version so Teams recognizes the change
+
+Then reinstall the app. The quickest way is the install link from the original `teams app create` output. If you need to retrieve it again:
+
+```bash
+teams app get <appId> --install-link
+```
+
+## Testing in Copilot
+
+Once the updated app is installed:
+
+1. Open M365 Copilot in Teams or at [m365.cloud.microsoft](https://m365.cloud.microsoft/)
+2. Your app should now be available as an agent option
+3. Interact with your agent through the Copilot interface
+
+## Manual Manifest Editing
+
+If you are not using the Teams Developer CLI, you can update the manifest by hand. Add the following to your `manifest.json`:
+
+```json
+"bots": [
+  {
+    "botId": "<your-bot-id>",
+    "scopes": ["personal", "team", "groupChat", "copilot"]
+  }
+],
+"copilotAgents": {
+  "customEngineAgents": [
+    {
+      "type": "bot",
+      "id": "<your-bot-id>"
+    }
+  ]
+}
+```
+
+After editing, re-package and upload the manifest:
+
+```bash
+teams app manifest upload <appId> ./manifest.json
+```
+
+Or zip the manifest and icons manually (manifest.json + color.png + outline.png) and sideload the zip in Teams.
+
+## Resources
+
+- [Convert Your Declarative Agent for Microsoft 365 Copilot to a Custom Engine Agent](https://learn.microsoft.com/en-us/microsoft-365-copilot/extensibility/convert-declarative-agent)
+- [Teams app manifest reference](https://learn.microsoft.com/microsoftteams/platform/resources/schema/manifest-schema)
+
+---
+
+### Pick the right SDK for your Teams agent
+
+# Pick the right SDK for your Teams agent
+
+Microsoft offers two supported, actively-developed SDKs that can build a bot or agent for Microsoft Teams:
+
+- **[Microsoft Teams SDK](https://github.com/microsoft/teams-sdk)**: the SDK these docs cover, a Teams-first application framework
+- **[Microsoft 365 Agents SDK](https://github.com/Microsoft/Agents)**: a multi-channel agent runtime that reaches Teams, M365 Copilot, Microsoft Copilot Studio, WebChat, and other surfaces
+
+Both ship for **C#, TypeScript, and Python**. Both speak the Activity Protocol (the JSON wire format for bot/agent activities such as messages and events), both interoperate with Microsoft Entra, both support agentic identity via Agent365 (shipped in the M365 Agents SDK; coming soon to Teams SDK), and both reach Microsoft 365 Copilot. Microsoft positions both as first-class. You are not locked into one path; see [Bot Framework migration](#bot-framework-migration) below for what switching between them entails.
+
+This doc helps you pick the SDK whose **defaults** match the bot or agent you're building. The criteria are about *fit*, not gates: the two SDKs are converging on most capabilities, so we focus on durable differences.
+
+## Which SDK for your Teams scenario
+
+How Teams-deep does your bot need to go? Two paths:
+
+- **Cross-channel essentials** are **breadth-focused**: Activity Protocol primitives that work uniformly across Teams, M365 Copilot, Copilot Studio, WebChat, and other channels. Best fit: the **M365 Agents SDK**.
+- **Teams-native collaboration** is **depth-focused**: the surfaces a bot needs to participate in group conversations the way Teams users expect (mentions, reactions, quoted replies, threaded replies, channel events, meetings experiences, citations, …). Best fit: the **Microsoft Teams SDK**.
+
+![M365 Agents SDK on Teams (breadth) vs Microsoft Teams SDK (depth)](/img/sdk-feature-comparison.png)
+
+### Cross-channel essentials: what you get with the M365 Agents SDK on Teams
+
+Activity Protocol primitives that work uniformly across channels.
+
+| Feature | Description |
+|---|---|
+| Text messages | Receive and reply |
+| Typing indicators | Acknowledge a message is being processed |
+| Streaming responses | Chunked output, useful for long or AI-generated messages |
+| Conversation update events | Members added / removed |
+| OAuth sign-in flow | Standard user authentication |
+| Proactive messaging | Send unsolicited messages to a saved conversation |
+| Adaptive Cards (basic) | Send cards and handle simple action callbacks |
+
+### Teams-native collaboration: what you get with the Microsoft Teams SDK on Teams
+
+Everything in the cross-channel essentials above, **plus** the Teams-native surface for **collaboration in group conversations**: the affordances your bot needs to participate in channels, chats, and meetings the way Teams users expect.
+
+| Feature | Description |
+|---|---|
+| @Mentions | Mention a specific user in a message; receive a `mention` activity when the bot is mentioned |
+| Reactions | Add / remove emoji reactions on messages |
+| Targeted (ephemeral) messages | Deliver a message to a specific user in a shared conversation; other participants don't see it |
+| Quoted replies | Parse incoming quoted-reply context; send replies that auto-quote the user's message or quote a specific message by ID |
+| Threaded replies | Reply to a specific message in a channel; channel reply chains |
+| Channel events | Channel created / renamed / deleted; team member changes |
+| Meetings experiences | Meeting start / end and participant join / leave events |
+| Citations | Render source citations on AI-generated messages |
+| "Generated by AI" label | Show a visual indicator that a message came from an AI |
+| Feedback loop | Capture user feedback (👍 / 👎) on AI messages |
+| SSO / silent token exchange | Sign-in token exchange invokes |
+| Slash commands | Manifest-registered command lists invoked from the Teams compose box |
+| Task modules | Show a form in a pop-up; `dialog.open` / `dialog.submit` (`task/fetch`, `task/submit`) invokes |
+| File consent, read receipts, suggested actions, O365 connector card actions | Additional Teams-specific invokes |
+| Message extensions | Search commands, link unfurling, action commands |
+
+> Rule of thumb: if your bot uses **most** of the Teams-native set above, the Teams SDK is the right home. If it uses **few or none**, the M365 Agents SDK is sufficient.
+
+## How they relate
+
+The two SDKs target different backends, but speak the same Activity Protocol to reach them.
+
+- **Teams Bot Service** (Microsoft Teams SDK): the Teams-native runtime that handles bot traffic for Microsoft Teams and the M365 Copilot client surface directly.
+- **Azure Bot Service** (M365 Agents SDK): the broader Bot Framework infrastructure that routes to Teams plus other channels (WebChat, DirectLine, etc.).
+
+Messages flow in both directions along the lines shown: a user's turn rises from the channel up through the backend and SDK to your code, and your reply travels back down the same path.
+
+```mermaid
+flowchart TB
+    Code([Your bot / agent code])
+    A["**M365 Agents SDK**"]
+    T["**Microsoft Teams SDK**"]
+    ABS["Azure Bot Service"]
+    TBS["Teams Bot Service"]
+
+    MTeams(["&nbsp;&nbsp;&nbsp;&nbsp;Microsoft Teams&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"])
+    M365C(["Microsoft 365 Copilot&nbsp;&nbsp;&nbsp;"])
+    MCS([Microsoft Copilot Studio])
+    WCD(["&nbsp;&nbsp;WebChat / DirectLine&nbsp;"])
+    TWD(["Twilio, WhatsApp, etc."])
+
+    Code --> T
+    Code --> A
+    T <-- "Activity Protocol" --> TBS
+    A <-- "Activity Protocol" --> ABS
+
+    TBS <--> MTeams
+    TBS <--> M365C
+
+    ABS <--> MTeams
+    ABS <--> M365C
+    ABS <--> MCS
+    ABS <--> WCD
+    ABS <--> TWD
+
+    classDef both fill:#5B5FC7,color:#fff,stroke:#fff,stroke-width:2px
+    classDef agentsOptimized fill:#E8AB14,color:#000,stroke:#000,stroke-width:2px,stroke-dasharray:5 4
+    class MTeams,M365C both
+    class MCS,WCD,TWD agentsOptimized
+```
+
+The channels then split into two groups:
+
+- **Microsoft Teams and Microsoft 365 Copilot** (solid borders in the diagram) are reachable from both SDKs. Cross-channel essentials are at parity; for Teams-native collaboration, use the Teams SDK.
+- **Microsoft Copilot Studio, WebChat / DirectLine, and other Bot Framework Connector channels** (dashed borders in the diagram) are reachable from either SDK in principle, but the M365 Agents SDK is the recommended, optimized path.
+
+## Bot Framework migration
+
+If you're migrating from the **Bot Framework SDK** (the `Microsoft.Bot.*` packages), both SDKs offer a path. Pick based on whether you want to **modernize end-to-end** or **host legacy code unchanged**.
+
+| | Migrate to M365 Agents SDK | Host legacy in Teams SDK |
+|---|---|---|
+| **What changes** | Package + namespace rename, `Program.cs` modernization, drop deprecated services | Add the compat package, register the adapter; existing handler unchanged |
+| **Effort** | Medium (modernization scope, not a one-line swap) | Minimal (install + a few lines of registration) |
+| **When to pick** | You want primitives preserved across a clean SDK switch; you may need cross-channel reach later | You want existing BotBuilder code running unchanged while you rewrite handlers piece by piece (or not at all) |
+
+## Next steps
+
+- **Sticking with Teams SDK?** Continue to [Get started](#quickstart-register-your-app) or the [TypeScript](#quickstart-register-your-app) / [C#](#quickstart-register-your-app) / [Python](#quickstart-register-your-app) guides.
+- **Need cross-channel reach?** Head to the [Microsoft 365 Agents SDK docs](https://learn.microsoft.com/en-us/microsoft-365/agents-sdk/).
+- **Already using Bot Framework or TeamsFx?** See [Bot Framework migration](#bot-framework-migration) above; both SDKs offer migration paths.
+
+:::tip Build for Teams *and* M365 Copilot at once
+Both SDKs reach Microsoft 365 Copilot through the same Teams client surface. Once your bot works in Teams, [enable it in M365 Copilot](#enabling-in-m365-copilot) with a single CLI command, then republish or reload the app. No code change required.
+:::
+
+---
