@@ -1,0 +1,732 @@
+ method
+case "webpage_dialog":
+    var webName = GetFormValue("name") ?? "Unknown";
+    var email = GetFormValue("email") ?? "No email";
+    await client.Send($"Hi {webName}, thanks for submitting the form! We got that your email is {email}");
+    return new Microsoft.Teams.Api.TaskModules.Response(
+        new Microsoft.Teams.Api.TaskModules.MessageTask("Form submitted successfully"));
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+// Add this case to the switch statement in the OnTaskSubmit handler
+case "webpage_dialog":
+    var webName = GetFormValue("name") ?? "Unknown";
+    var email = GetFormValue("email") ?? "No email";
+    await context.SendAsync($"Hi {webName}, thanks for submitting the form! We got that your email is {email}", cancellationToken);
+    return TaskModuleResponse.CreateBuilder()
+        .WithType(TaskModuleResponseTypes.Message)
+        .WithMessage("Form submitted successfully")
+        .Build();
+```
+
+### Complete TaskSubmit Handler Example
+
+Here's the complete example showing how to handle multiple submission types:
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Api.TaskModules;
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Activities.Invokes;
+using Microsoft.Teams.Apps.Annotations;
+using Microsoft.Teams.Common.Logging;
+
+//...
+
+[TaskSubmit]
+public async Task OnTaskSubmit([Context] Tasks.SubmitActivity activity, [Context] IContext.Client client, [Context] ILogger log)
+{
+    var data = activity.Value?.Data as JsonElement?;
+    if (data == null)
+    {
+        log.Info("[TASK_SUBMIT] No data found in the activity value");
+        return new Microsoft.Teams.Api.TaskModules.Response(
+            new Microsoft.Teams.Api.TaskModules.MessageTask("No data found in the activity value"));
+    }
+
+    var submissionType = data.Value.TryGetProperty("submissiondialogtype", out var submissionTypeObj) && submissionTypeObj.ValueKind == JsonValueKind.String
+        ? submissionTypeObj.ToString()
+        : null;
+
+    string? GetFormValue(string key)
+    {
+        if (data.Value.TryGetProperty(key, out var val))
+        {
+            if (val is JsonElement element)
+                return element.GetString();
+            return val.ToString();
+        }
+        return null;
+    }
+
+    switch (submissionType)
+    {
+        case "simple_form":
+            var name = GetFormValue("name") ?? "Unknown";
+            await client.Send($"Hi {name}, thanks for submitting the form!");
+            return new Microsoft.Teams.Api.TaskModules.Response(
+                new Microsoft.Teams.Api.TaskModules.MessageTask("Form was submitted"));
+
+        case "webpage_dialog":
+            var webName = GetFormValue("name") ?? "Unknown";
+            var email = GetFormValue("email") ?? "No email";
+            await client.Send($"Hi {webName}, thanks for submitting the form! We got that your email is {email}");
+            return new Microsoft.Teams.Api.TaskModules.Response(
+                new Microsoft.Teams.Api.TaskModules.MessageTask("Form submitted successfully"));
+
+        default:
+            return new Microsoft.Teams.Api.TaskModules.Response(
+                new Microsoft.Teams.Api.TaskModules.MessageTask("Unknown submission type"));
+    }
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Apps.TaskModules;
+
+//...
+
+teams.OnTaskSubmit(async (context, cancellationToken) =>
+{
+    var data = context.Activity.Value?.Data as JsonElement?;
+    if (data == null)
+    {
+        return TaskModuleResponse.CreateBuilder()
+            .WithType(TaskModuleResponseTypes.Message)
+            .WithMessage("No data found in the activity value")
+            .Build();
+    }
+
+    var submissionType = data.Value.TryGetProperty("submissiondialogtype", out var submissionTypeObj) && submissionTypeObj.ValueKind == JsonValueKind.String
+        ? submissionTypeObj.ToString()
+        : null;
+
+    string? GetFormValue(string key)
+    {
+        if (data.Value.TryGetProperty(key, out var val))
+        {
+            if (val is JsonElement element)
+                return element.GetString();
+            return val.ToString();
+        }
+        return null;
+    }
+
+    switch (submissionType)
+    {
+        case "simple_form":
+            var name = GetFormValue("name") ?? "Unknown";
+            await context.SendAsync($"Hi {name}, thanks for submitting the form!", cancellationToken);
+            return TaskModuleResponse.CreateBuilder()
+                .WithType(TaskModuleResponseTypes.Message)
+                .WithMessage("Form was submitted")
+                .Build();
+
+        case "webpage_dialog":
+            var webName = GetFormValue("name") ?? "Unknown";
+            var email = GetFormValue("email") ?? "No email";
+            await context.SendAsync($"Hi {webName}, thanks for submitting the form! We got that your email is {email}", cancellationToken);
+            return TaskModuleResponse.CreateBuilder()
+                .WithType(TaskModuleResponseTypes.Message)
+                .WithMessage("Form submitted successfully")
+                .Build();
+
+        default:
+            return TaskModuleResponse.CreateBuilder()
+                .WithType(TaskModuleResponseTypes.Message)
+                .WithMessage("Unknown submission type")
+                .Build();
+    }
+});
+```
+
+A message sent from a submission handler is placed like a message sent from a card action.
+In a 1:1 chat it goes into the thread of the card whose button opened the dialog, when that card is inside a thread.
+See [Responding to edits, reactions and card actions](#sending-messages).
+
+---
+
+### Middleware
+
+# Middleware
+
+**Turn middleware** is how a 2.1 app runs logic on *every* activity it receives — before that activity reaches your handlers. Use it for cross-cutting concerns like logging, metrics, and request enrichment.
+
+```mermaid
+flowchart LR
+    Teams["Teams"]:::less-interesting
+    Server["App Server<br/>(ASP.NET Core)"]:::interesting
+    Middleware["Turn Middleware<br/>(every turn)"]:::interesting
+    Handlers["Activity Handlers"]:::interesting
+    Lifecycle["App Lifecycle & Errors<br/>(IHostApplicationLifetime,<br/>try/catch, context.Log)"]:::interesting
+
+    Teams --> |Activity| Server
+    Server --> Middleware
+    Middleware --> Handlers
+    Server -.-> Lifecycle
+
+    linkStyle 0,1,2 stroke:#b1650f,stroke-width:1px
+    linkStyle 3 stroke:#b1650f,stroke-width:1px,stroke-dasharray:4
+    classDef interesting fill:#b1650f,stroke:#333,stroke-width:4px;
+```
+
+## Relationship to SDK 2.0
+
+If you're coming from SDK 2.0, the plugin event bus is gone. The table below maps each thing you used to handle in 2.0 onto its 2.1 mechanism:
+
+**SDK 2.0 (Legacy):**
+
+| **Event Name**      | **Description**                                                                |
+| ------------------- | ------------------------------------------------------------------------------ |
+| `start`             | Triggered when your application starts. Useful for setup or boot-time logging. |
+| `signin`            | Triggered during a sign-in flow via Teams.                                     |
+| `error`             | Triggered when an unhandled error occurs in your app. Great for diagnostics.   |
+| `activity`          | A catch-all for incoming Teams activities (messages, commands, etc.).          |
+| `activity.response` | Triggered when your app sends a response to an activity. Useful for logging.   |
+| `activity.sent`     | Triggered when an activity is sent (not necessarily in response).              |
+
+**SDK 2.1 (current):**
+
+In SDK 2.1 there is no separate plugin event bus. Instead, these concerns map onto standard .NET building blocks:
+
+| **What you want to react to** | **How you handle it in 2.1** |
+| ----------------------------- | ---------------------------- |
+| Cross-cutting logic on every turn (logging, metrics, enrichment) | **Turn middleware** — implement `ITurnMiddleware` and register with `teams.UseMiddleware(...)` |
+| Incoming Teams activity       | Dedicated handlers (`OnMessage`, `OnMembersAdded`, `OnInstall`, …) or `OnEvent` for custom event activities |
+| App start / stop              | ASP.NET Core `IHostApplicationLifetime` (`ApplicationStarted`, `ApplicationStopping`) |
+| Sign-in completed / failed    | `teams.GetOAuthFlow(name).OnSignInComplete(...)` / `OnSignInFailure(...)` |
+| Unhandled error in a handler  | `try`/`catch` with `context.Log`, or standard ASP.NET Core exception handling (`BotHandlerException` wraps the failure) |
+
+## Turn middleware
+
+Turn middleware runs on every incoming activity, in registration order, before your activity handlers. Implement `ITurnMiddleware` — do your work, then call `nextTurn` to pass control down the pipeline — and register it with `teams.UseMiddleware(...)`. This is the right place for logging, metrics, or any logic that should apply to the whole app.
+
+For example, to observe (a catch-all) and log every incoming activity:
+
+**SDK 2.0 (Legacy):**
+
+When an activity is received, log its `JSON` payload.
+
+```csharp
+app.OnActivity((sender, @event) =>
+{
+    app.Logger.Info(@event.Activity.ToString());
+});
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Core;
+using Microsoft.Teams.Core.Schema;
+
+internal class ActivityLoggingMiddleware : ITurnMiddleware
+{
+    public async Task OnTurnAsync(
+        BotApplication botApplication,
+        CoreActivity activity,
+        NextTurn nextTurn,
+        CancellationToken cancellationToken = default)
+    {
+        // When an activity is received, log its payload.
+        Console.WriteLine(activity.ToString());
+        await nextTurn(cancellationToken);
+    }
+}
+```
+
+Register it during startup:
+
+```csharp
+teams.UseMiddleware(new ActivityLoggingMiddleware());
+```
+
+## Handling errors
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnError((sender, @event) =>
+{
+    // do something with the error
+    app.Logger.Info(@event.Exception.ToString());
+});
+```
+
+**SDK 2.1 (current):**
+
+Handle errors where they occur and log them through `context.Log`:
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    try
+    {
+        // ... your handler logic
+    }
+    catch (Exception ex)
+    {
+        // do something with the error
+        context.Log.Error(ex.ToString());
+    }
+});
+```
+
+For app-wide error handling, use standard ASP.NET Core exception-handling middleware — failures during activity processing surface as a `BotHandlerException` that wraps the original exception and the offending activity.
+
+---
+
+### Quickstart: Build your first bot
+
+# Quickstart: Build your first bot
+
+Write a bot that responds to messages in Teams using the Teams SDK. Pick your language below.
+
+:::tip
+If you haven't registered your Teams app yet, start with [Quickstart: Register your app](#quickstart-register-your-app) — you'll need the credentials before this code can talk to Teams.
+:::
+
+## Pick your language
+
+**TypeScript:**
+
+If you scaffolded with `teams project new typescript`, your `src/index.ts` already looks like this:
+
+```typescript
+
+const app = new App();
+
+app.on('message', async ({ send, activity }) => {
+  await send({ type: 'typing' });
+  await send(`you said "${activity.text}"`);
+});
+
+app.start(process.env.PORT || 3978).catch(console.error);
+```
+
+| Part | Purpose |
+|---|---|
+| `new App()` | Reads credentials from `.env` automatically |
+| `app.on('message', ...)` | Registers a handler for incoming messages |
+| `send( type: 'typing' )` | Shows the typing indicator while you build a reply |
+| `send(...)` | Replies in the same conversation |
+| `app.start(port)` | Starts the HTTP server on the given port |
+
+Run it:
+
+```bash
+npm run dev
+```
+
+Continue with the [TypeScript guide](#quickstart-register-your-app) for events, sending messages, Adaptive Cards, AI, and more.
+
+**C#:**
+
+If you scaffolded with `teams project new csharp`, your `Program.cs` already looks like this:
+
+```csharp
+using Microsoft.Teams.Apps;
+
+WebApplicationBuilder builder = WebApplication.CreateSlimBuilder(args);
+builder.Services.AddTeamsBotApplication();
+WebApplication app = builder.Build();
+
+TeamsBotApplication teams = app.UseTeamsBotApplication();
+
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    await context.TypingAsync(cancellationToken: cancellationToken);
+    await context.SendAsync($"you said '{context.Activity.Text}'", cancellationToken);
+});
+
+app.Run();
+```
+
+Run it:
+
+```bash
+dotnet run
+```
+
+Continue with the [C# guide](#quickstart-register-your-app) for events, sending messages, Adaptive Cards, AI, and more.
+
+**Python:**
+
+If you scaffolded with `teams project new python`, your `src/main.py` already looks like this:
+
+```python
+
+from microsoft_teams.api import MessageActivity, TypingActivityInput
+from microsoft_teams.apps import ActivityContext, App
+
+app = App()
+
+@app.on_message_pattern(re.compile(r"hello|hi|greetings"))
+async def handle_greeting(ctx: ActivityContext[MessageActivity]) -> None:
+    """Handle greeting messages."""
+    await ctx.send("Hello! How can I assist you today?")
+
+@app.on_message
+async def handle_message(ctx: ActivityContext[MessageActivity]):
+    """Handle message activities using the new generated handler system."""
+    await ctx.reply(TypingActivityInput())
+
+    if "reply" in ctx.activity.text.lower():
+        await ctx.reply("Hello! How can I assist you today?")
+    else:
+        await ctx.send(f"You said '{ctx.activity.text}'")
+
+def main():
+    asyncio.run(app.start())
+
+if __name__ == "__main__":
+    main()
+```
+
+The scaffold registers two handlers: `on_message_pattern` for greetings and a fall-through `on_message` for everything else.
+
+Run it:
+
+```bash
+pip install -e .
+python src/main.py
+```
+
+Continue with the [Python guide](#quickstart-register-your-app) for events, sending messages, Adaptive Cards, AI, and more.
+
+## What's next
+
+- **Essentials** — events, activities, sending messages, authentication: [TypeScript](#essentials) · [C#](#essentials) · [Python](#essentials)
+- **In-depth guides** — Adaptive Cards, AI, MCP, dialogs, tabs, and more: [TypeScript](#in-depth-guides) · [C#](#in-depth-guides) · [Python](#in-depth-guides)
+- [Quickstart: Register your app](#quickstart-register-your-app) — set up bot infrastructure with the Teams Developer CLI
+
+---
+
+### Receiving Files
+
+# Receiving Files
+
+Teams users can send files to agents by attaching them to chat messages. When users send files to an agent in 1:1 chat, or to an agentic user in a group chat or channel, they arrive as part of the context of the received message activity. `context.Files` provides lazy access to the metadata and bytes of each attached file.
+
+An attached file is not delivered inline with the message. Teams stores the file in OneDrive or SharePoint and hands your agent a small metadata attachment describing it, including a short-lived, pre-authorized URL in personal scopes for traditional bots, while agentic users must make a Graph call via the `contentUrl`. Reading the contents means fetching the bytes from either URL over the network, so the download itself is deferred until explicitly called.
+
+This API covers file downloads in **personal (1:1) chats** for every agent. Agentic users can also download files in **group chats** and **channels** starting in version 2.2.0; traditional bots don't receive files there. See [Conversation scope support](#conversation-scope-support).
+
+## Enable file support in your manifest for traditional bots
+
+Teams only offers users the option to attach a file in 1:1 with a bot when your app manifest opts in. Set `supportsFiles` to `true` on your bot entry; without it the compose box shows no attach affordance for your agent, no file reaches your handler, and `context.Files.ListAsync()` is always empty:
+
+```json
+"bots": [
+  {
+    "botId": "${{BOT_ID}}",
+    "scopes": ["personal"],
+    "supportsFiles": true
+  }
+]
+```
+
+## Enable file support on the blueprint for agentic users
+
+Agentic users need a Graph file permission consented on the agent's blueprint by an administrator in order to access files. See [inheritable permissions](https://learn.microsoft.com/entra/agent-id/concept-inheritable-permissions) for how an agent acquires those scopes.
+
+## Access attached files
+
+The accessor `context.Files` is available on every activity context, but only inbound message activities carry attachments, so it is empty everywhere else. Use `ListAsync()` to get all files on the current message, including pasted images, or `FirstAsync()` for the common single-file case. Both hand back the file's metadata rather than its contents, so listing is cheap even when the attached files are large:
+
+```csharp
+teamsApp.OnMessage(async (context, cancellationToken) =>
+{
+    IList attached = await context.Files.ListAsync(cancellationToken);
+
+    if (attached.Count == 0)
+    {
+        await context.ReplyAsync("Send me a file and I will read it.", cancellationToken);
+        return;
+    }
+
+    string names = string.Join(", ", attached.Select(f => f.Name));
+    await context.ReplyAsync($"You sent {attached.Count} file(s): {names}", cancellationToken);
+});
+```
+
+Listing with `ListAsync()` returns the files in the same order they arrived. It never throws: activities with no attachments (or non-message activities) return an empty list, and malformed file entries are skipped rather than failing the whole batch.
+
+```csharp
+IncomingFile? file = await context.Files.FirstAsync(cancellationToken);
+
+if (file is not null)
+{
+    await context.ReplyAsync($"Reading {file.Name}...", cancellationToken);
+}
+```
+
+Images the user pasted into the message are listed too, with `AttachmentStyle` set to `AttachmentStyle.InlineImage` (see [Receiving Inline Images](#receiving-inline-images)). Files sent as file attachments have the `AttachmentStyle.File` style. To list only one style, pass it as a filter to `ListAsync()` or `FirstAsync()`:
+
+```csharp
+// Only files sent as file attachments
+IList attachedFiles = await context.Files.ListAsync(
+    new FileListOptions { AttachmentStyle = AttachmentStyle.File },
+    cancellationToken);
+
+// Only images pasted into the message
+IList pastedImages = await context.Files.ListAsync(
+    new FileListOptions { AttachmentStyle = AttachmentStyle.InlineImage },
+    cancellationToken);
+```
+
+:::note
+Starting in 2.2.0, `ListAsync()` and `FirstAsync()` return pasted images when no filter is given. To keep the previous behavior of returning only file attachments, pass `AttachmentStyle.File` as the filter.
+:::
+
+### File metadata
+
+Each `IncomingFile` carries metadata describing the file, populated from what the platform reports:
+
+| Property | Description |
+|---|---|
+| `UniqueId` | The OneDrive/SharePoint drive-item id, when the platform provides it. Present only for files backed by ODSP storage. |
+| `Name` | File name including its extension (e.g. `report.pdf`). |
+| `Extension` | File extension without the dot (e.g. `pdf`), from the platform-supplied `fileType`. Absent when the platform omits it. |
+| `AttachmentStyle` | How the file was attached: `AttachmentStyle.File` when sent as a file attachment, or `AttachmentStyle.InlineImage` when pasted into the message. |
+| `ContentType` | The file's MIME type, when the source provides one. Always unset for file attachments received from a bot activity: the `file.download.info` attachment carries no MIME type, only the extension surfaced as `Extension`. To learn the type of the bytes you actually received, read `ContentType` on the downloaded file, which is resolved from the download response. For an inline image, see [Receiving Inline Images](#receiving-inline-images). |
+| `Scope` | The conversation scope the file arrived in (`personal`, `groupChat`, or `channel`). |
+| `Source` | Where the SDK found the file. Currently always `botActivity`. |
+| `ContentUrl` | A browsable link to the file in OneDrive/SharePoint, when known. Not a fetchable download URL. For an inline image, it is the image's Bot API location. |
+| `Raw` | The original wire attachment (the metadata object, not the bytes) — see [Access the raw attachment](#access-the-raw-attachment). |
+
+## Read a file
+
+The most common path is `DownloadAsync()`, which fetches the whole file and buffers it into an in-memory copy you own:
+
+```csharp
+IncomingFile? file = await context.Files.FirstAsync(
+    new FileListOptions { AttachmentStyle = AttachmentStyle.File },
+    cancellationToken);
+
+if (file is not null)
+{
+    DownloadedFile downloaded = await file.DownloadAsync(cancellationToken);
+
+    await context.ReplyAsync($"Downloaded {downloaded.Filename} ({downloaded.Bytes.Length} bytes, {downloaded.ContentType})", cancellationToken);
+}
+```
+
+For text files, `TextAsync()` is a shortcut for `DownloadAsync()` followed by decoding:
+
+```csharp
+IncomingFile? file = await context.Files.FirstAsync(
+    new FileListOptions { AttachmentStyle = AttachmentStyle.File },
+    cancellationToken);
+
+if (file is not null)
+{
+    string contents = await file.TextAsync(cancellationToken: cancellationToken);
+    await context.ReplyAsync($"The file starts with: {contents[..Math.Min(100, contents.Length)]}", cancellationToken);
+}
+```
+
+:::note
+Decoding with `TextAsync()` reads the downloaded bytes as UTF-8 by default, and is lossy: bytes that are not valid for the encoding become the replacement character (`U+FFFD`) instead of throwing. To decode a different encoding, pass an `Encoding` (e.g. `file.TextAsync(Encoding.Latin1)`). For binary files, read the raw bytes instead.
+:::
+
+To save a file to disk without holding it all in memory, use `SaveAsAsync()`, which streams straight to the path:
+
+```csharp
+await file.SaveAsAsync("./downloads/report.pdf", cancellationToken);
+```
+
+The path is resolved relative to the process working directory, overwrites an existing file, and does not create missing parent directories.
+
+:::warning
+A file's `Name` comes off the wire and is set by the uploader, so treat it as untrusted input rather than a destination. It may contain `/` or `\`, a drive or UNC prefix, or `..` segments, and no sanitization is performed on the developer's behalf. Therefore, no assumptions are made related to the destination like illegal characters based on operating system or naming collisions.
+:::
+
+For large files or streaming pipelines, `StreamAsync()` hands you the raw byte stream so you can process it as it arrives:
+
+```csharp
+await using Stream stream = await file.StreamAsync(cancellationToken);
+
+byte[] buffer = new byte[8192];
+int read;
+while ((read = await stream.ReadAsync(buffer, cancellationToken)) > 0)
+{
+    // process only the bytes read this iteration (e.g. pipe to a parser)
+    ReadOnlyMemory<byte> chunk = buffer.AsMemory(0, read);
+}
+```
+
+An `IncomingFile` handle holds no cached bytes: each call to `DownloadAsync()`, `TextAsync()`, `StreamAsync()`, or `SaveAsAsync()` fetches the file again. This matters because a file's download link is short-lived: the URL embeds its own pre-authorized `tempauth` credential, which can expire between reads. To read the same file several ways, call `DownloadAsync()` once and reuse the downloaded file it returns, which is a point-in-time copy whose readers never re-fetch:
+
+```csharp
+DownloadedFile downloaded = await file.DownloadAsync(cancellationToken);
+
+string text = downloaded.Text();                               // decode as UTF-8
+byte[] bytes = downloaded.Bytes;                               // the raw bytes
+await downloaded.SaveAsAsync("./copy.bin", cancellationToken); // write to disk, no re-fetch
+```
+
+| Property / method | Description |
+|---|---|
+| `Bytes` | The buffered file bytes as a `byte[]`. |
+| `ContentType` | MIME type resolved from the download response header, or the incoming file's metadata type if the response omits one. Falls back to `application/octet-stream` when neither provides a type, so this is never empty. |
+| `Filename` | The resolved file name. |
+| `SourceUrl` | The URL the bytes were fetched from. |
+| `Text(encoding?)` | Decode the bytes as UTF-8 (or a given encoding). Lossy; never throws. |
+| `SaveAsAsync(path)` | Write the buffered bytes to a local path (no re-fetch). |
+
+## Handle errors
+
+Byte retrieval can fail for a few well-defined reasons. All of them share a common base error, so a single check catches any of them and a new one can be added later without callers changing:
+
+```csharp
+using Microsoft.Teams.Apps.Files;
+```
+
+| Error | Raised when | Carries |
+|---|---|---|
+| **File URL expired** | The short-lived, pre-authorized download link lapsed before the bytes were fetched. | `reason`: <br/> **first fetch**, the link had already lapsed so no bytes were retrieved; <br /> **re-read**, an earlier download succeeded, but a later read through the same handle came after expiry. Avoid this by downloading once and reusing the downloaded file. |
+| **No Graph credential** | The Graph read an agentic user's file needs was ruled out before the request, because no credential was available. | `actor`<sup><a href="#actor">2</a></sup>: the identity a credential was being resolved for. <br /> `cause`: why acquiring the token failed, when it failed rather than simply returning nothing. |
+| **File access denied** | The Graph read an agentic user's file needs was refused by the storage service. | `status`: `401` when the token itself was rejected, `403` when the identity lacks the grant<sup><a href="#access-denied">1</a></sup>. <br/> `actor`<sup><a href="#actor">2</a></sup>: the identity that was refused. <br /> `details`: what the service said, if anything. |
+| **Inline image could not be converted** | The Teams service could not convert a pasted image for download. See [Formats that cannot be downloaded](#receiving-inline-images). | `status`: `415`. <br /> `code`: the service's error code, such as `TransformationFailed`, when present. <br /> `details`: what the service said, if anything. <br /> `actor`<sup><a href="#actor">2</a></sup>: the identity the read was attempted as. |
+| **Inline image access denied** | The Bot API refused the token presented for a pasted image. | `status`: `401` when the token itself was rejected, `403` when the identity is not allowed to read the image. <br /> `actor`<sup><a href="#actor">2</a></sup>: the identity that was refused. <br /> `details`: what the service said, if anything. |
+| **File scope not supported** | Download was called on a file from a conversation scope this API does not yet support, meaning anything other than personal, group chat, or channel for an agentic user. A traditional bot receives files only in personal (1:1) chats. | `scope`: the conversation scope. |
+
+<sup id="access-denied">1</sup> A **`403`** deliberately collapses causes the SDK cannot differentiate: an unconsented permission, a file the identity was never granted, and an item that does not exist all arrive the same way. There is no separate "file not found" case to branch on; `details` carries the service's own text for diagnosis. In a standard channel, a file picked from OneDrive or SharePoint, rather than uploaded, can be refused this way, because Teams does not grant the agent access to the picked item (see [Group chats and channels](#group-chats-and-channels)). A `401` is a different problem, which is why the status is reported rather than folded in: the token was rejected, so the fix is the token rather than the sharing.
+
+<sup id="actor">2</sup> `actor` names which identity the read was attempted as. The SDK chooses it, and today there are two:
+
+- **Agentic user**, chosen whenever the inbound activity carries an agentic identity. An agentic user reads as itself rather than as an app. Its Graph scopes come from its blueprint's inheritable permissions set by a tenant administrator or from a direct grant by a user with permissions to share it.
+- **App**, chosen for every other activity. Graph file retrieval is supported for agentic users, which read as their own identity; an app identity and user-delegated permissions may be used, but are not supported through the SDK at this time.
+
+The actor is absent when the failure came before any identity was selected, which is the case when the app has no Graph route configured at all.
+
+A transport or service failure, such as a Graph 5xx, is not one of these and surfaces as an ordinary error.
+
+You may add error handling based on the type of error: 
+
+```csharp
+try
+{
+    DownloadedFile downloaded = await file.DownloadAsync(cancellationToken);
+    // ...
+}
+catch (FileUrlExpiredException err) when (err.Reason == FileUrlExpiredReason.FirstFetch)
+{
+    await context.ReplyAsync("That file link has expired before it could be read.", cancellationToken);
+}
+catch (FileCredentialException err)
+{
+    await context.ReplyAsync($"Could not read that file as {err.Actor?.ToString() ?? "the identity used"}: no Graph credential was available.", cancellationToken);
+}
+catch (FileAccessException err)
+{
+    await context.ReplyAsync($"Could not read that file as {err.Actor?.ToString() ?? "the identity used"}: the service returned {err.Status}.", cancellationToken);
+}
+catch (InlineImageTransformationException)
+{
+    await context.ReplyAsync("That pasted image cannot be downloaded. Try sending it as a file attachment instead.", cancellationToken);
+}
+catch (InlineImageAccessException err)
+{
+    await context.ReplyAsync($"Could not read that pasted image as {err.Actor?.ToString() ?? "the identity used"}: the service returned {err.Status}.", cancellationToken);
+}
+catch (FileScopeNotSupportedException err)
+{
+    await context.ReplyAsync($"Downloading files from {err.Scope} conversations is not supported yet.", cancellationToken);
+}
+catch (FileException)
+{
+    // Any future inbound-file failure lands here rather than escaping unhandled.
+    await context.ReplyAsync("That file could not be read.", cancellationToken);
+}
+```
+
+## Access the raw attachment
+
+Every file the accessor returns retains its original wire attachment on `Raw`, for diagnostics or for the rare case where you need a field the typed surface does not expose:
+
+```csharp
+using System.Text.Json;
+
+IncomingFile? file = await context.Files.FirstAsync(cancellationToken);
+
+if (file is not null)
+{
+    // `Raw` is the untyped wire attachment: the escape hatch when you need a
+    // field the typed surface does not expose. Here we serialize the whole
+    // attachment to inspect exactly what the platform sent.
+    string wire = JsonSerializer.Serialize(file.Raw);
+    await context.ReplyAsync($"raw attachment: {wire}", cancellationToken);
+}
+```
+
+Attachments that are **not** files or inline images (Adaptive Cards, mentions, link previews), and malformed file entries the accessor skips, are not returned by `ListAsync()` and therefore have no `IncomingFile`. Reach those directly through `context.Activity.Attachments`. The HTML attachment that accompanies a pasted image is also only in that array; see [Receiving Inline Images](#receiving-inline-images).
+
+## Conversation scope support
+
+Listing with `ListAsync()` surfaces the files Teams delivers on the incoming activity. What gets delivered and downloaded depends on the conversation scope and on whether your agent is a traditional bot or an agentic user.
+
+### Personal chats
+
+Downloading in personal (1:1) chats depends on the URL the platform sends, not on who is reading. A traditional bot receives a short-lived, pre-authorized download link, which the SDK fetches directly with no token attached.
+
+An **agentic user** receives no pre-authorized link. Its attachment data carries only a `contentUrl` locating the item in OneDrive or SharePoint, so the SDK resolves the bytes through Microsoft Graph's `/shares` endpoint using the agent's own credential. The call behavior is unchanged from above; only the downloading route underneath differs.
+
+If an agentic user has no usable Graph credential, the read fails with `FileCredentialException`; if the storage service refuses the read, for example because the file isn't shared with the agent, it fails with `FileAccessException` (see [Handle errors](#handle-errors)). Both name the identity involved rather than reporting the file as missing.
+
+### Group chats and channels
+
+:::info[Coming Soon]
+Receiving files as an agentic user in group chats and channels is planned for the next SDK release, version 2.2.0.
+:::
+
+In **group chats** and **channels**, the attachment has the same shape, carrying only a `contentUrl`. The SDK reads it through Graph `/shares` using the agent's own credential. Your handler code is the same too: call `ListAsync()` and then `DownloadAsync()`, and the SDK chooses the agent's credential.
+
+Outside personal chats, only messages that @mention the agent reach it, so a file posted without an @mention is never delivered.
+
+A file can be attached by uploading it from the device or by picking it from OneDrive or SharePoint. Whether each kind downloads depends on the conversation:
+
+- In **group chats**, both kinds download.
+- In **private channels**, both kinds download. A picked file is delivered as a copy in the channel's site.
+- In **non-private channels**, files uploaded from the device download, but a picked file can be refused, because Teams does not grant the agent access to the picked item. The refusal surfaces as `FileAccessException` with a `403` status (see [Handle errors](#handle-errors)).
+
+The SDK reads each file as the agent, so a download succeeds only when the agent already has access to that file. A sharing link that doesn't name the agent, such as an "Anyone" link or an organization-wide link, doesn't give it that access.
+
+Files attached to a reply in a channel thread follow the same rules as files on a new post.
+
+A traditional bot cannot receive files in group chats or channels: the attached file isn't delivered to it on the activity, so `ListAsync()` doesn't surface it.
+
+## Next steps
+
+- See [Files in Teams bots](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/bots-filesv4) for the platform-side file model.
+
+---
+
+### SSO Troubleshooting
+
+# SSO Troubleshooting
+
+When SSO fails, Teams sends a `signin/failure` invoke activity to your bot with a `code` and `message` describing the error. The SDK's default handler logs a warning with these details.
+
+## Failure codes
+
+| Code | Silent | Description |
+|------|--------|-------------|
+| `installappfailed` | No | Failed to install the app in the user's personal scope (group chat SSO flow). |
+| `authrequestfailed` | No | The SSO auth request failed after app installation. |
+| `installedappnotfound` | Yes | The bot app is not installed for the user or group chat. *(most common)* |
+| `invokeerror` | Yes | A generic error occurred during the SSO invoke flow. |
+| `resourcematchfailed` | Yes | The token exchange resource URI on the OAuthCard does not match the Application ID URI in the Entra app registration's "Expose an API" section. *(common)* |
+| `oauthcardnotvalid` | Yes | The bot's OAuthCard could not be parsed. |
+| `tokenmissing` | Yes | AAD token acquisition failed. |
+
+"Silent" failures produce no user-facing feedback in the Teams client — the user sees nothing and sign-in simply 

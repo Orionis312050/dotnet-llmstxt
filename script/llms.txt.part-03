@@ -1,0 +1,897 @@
+thentication** and add a **Web** platform redirect URI with the value `https://token.botframework.com/.auth/web/redirect`
+
+![Entra auth redirect](/screenshots/entra-auth-redirect.png)
+
+2. Configure the API. From `Expose an API`, click `Add` to Application ID URI and set the value to `api://`. Add the scope `access_as_user` and select who can _consent_.
+
+![Entra oauth scopes](/screenshots/entra-oauth-scopes.png)
+
+3. Authorize the client applications for SSO. To enable the Teams clients, desktop and web, to perform the SSO flow you must add the following client applications to the scope defined before: Teams Desktop `1fec8e78-bce4-4aaf-ab1b-5451cc387264` and Teams Web `5e3ce6c0-2b1f-4285-8d4b-75ee78787346`
+
+![Entra oauth authorize client app](/screenshots/entra-authorize-clientapp.png)
+
+**Azure CLI:**
+
+The full SSO setup involves several steps the Teams Developer CLI doesn't handle directly (creating the `access_as_user` scope, pre-authorizing Teams clients, configuring the OAuth connection in Azure Bot Service, updating `webApplicationInfo` in the manifest). The [`teams-dev` skill](#agent-skills) orchestrates all of this for you — install it in your AI coding assistant and say *"set up SSO for my Teams bot"*.
+
+### Step 1: Look Up the AAD App Object ID
+
+The Microsoft Graph object ID differs from the app's Client ID. Query it using the `az` CLI:
+
+```bash
+az rest \
+  --method GET \
+  --uri "https://graph.microsoft.com/v1.0/applications?\$filter=appId eq '$appId'" \
+  --query "value[0].id" \
+  --output tsv
+```
+
+Save the result as your `objectId`.
+
+### Step 2: Generate a Scope UUID
+
+The `access_as_user` scope needs a stable unique identifier. Generate one with PowerShell, bash, or any UUID tool:
+
+```bash
+# PowerShell
+[guid]::NewGuid().ToString()
+
+# bash / macOS / Linux
+uuidgen
+```
+
+Save the result as your `scopeId`.
+
+### Step 3: Configure the AAD App (Identifier URI, Scope, Redirect URI)
+
+Substitute your `appId` and `scopeId` into the following command:
+
+```bash
+az rest \
+  --method PATCH \
+  --uri "https://graph.microsoft.com/v1.0/applications/$objectId" \
+  --headers "Content-Type=application/json" \
+  --body "{
+    \"identifierUris\": [\"api://botid-$appId\"],
+    \"api\": {
+      \"requestedAccessTokenVersion\": 2,
+      \"oauth2PermissionScopes\": [{
+        \"id\": \"$scopeId\",
+        \"adminConsentDescription\": \"Allow the application to access the bot on behalf of the signed-in user.\",
+        \"adminConsentDisplayName\": \"Access as user\",
+        \"userConsentDescription\": \"Allow the application to access the bot on your behalf.\",
+        \"userConsentDisplayName\": \"Access as user\",
+        \"isEnabled\": true,
+        \"type\": \"User\",
+        \"value\": \"access_as_user\"
+      }]
+    },
+    \"web\": {
+      \"redirectUris\": [\"https://token.botframework.com/.auth/web/redirect\"]
+    }
+  }"
+```
+
+### Step 4: Pre-Authorize Teams Clients
+
+Pre-authorize the Teams desktop and web clients so they can silently acquire SSO tokens. Substitute your `scopeId`:
+
+```bash
+az rest \
+  --method PATCH \
+  --uri "https://graph.microsoft.com/v1.0/applications/$objectId" \
+  --headers "Content-Type=application/json" \
+  --body "{
+    \"api\": {
+      \"oauth2PermissionScopes\": [{
+        \"id\": \"$scopeId\",
+        \"adminConsentDescription\": \"Allow the application to access the bot on behalf of the signed-in user.\",
+        \"adminConsentDisplayName\": \"Access as user\",
+        \"userConsentDescription\": \"Allow the application to access the bot on your behalf.\",
+        \"userConsentDisplayName\": \"Access as user\",
+        \"isEnabled\": true,
+        \"type\": \"User\",
+        \"value\": \"access_as_user\"
+      }],
+      \"preAuthorizedApplications\": [
+        {
+          \"appId\": \"1fec8e78-bce4-4aaf-ab1b-5451cc387264\",
+          \"delegatedPermissionIds\": [\"$scopeId\"]
+        },
+        {
+          \"appId\": \"5e3ce6c0-2b1f-4285-8d4b-75ee78787346\",
+          \"delegatedPermissionIds\": [\"$scopeId\"]
+        }
+      ]
+    }
+  }"
+```
+
+:::note
+The pre-authorization patch must run after the scope patch because the pre-authorized apps reference the `scopeId`, which must exist first. If it fails with a scope-not-found error, wait 15 seconds (AAD replication lag) and retry.
+:::
+
+## Create the OAuth connection in Azure Bot Service
+
+You need to add a new OAuth connection to your Azure Bot Service resource.
+
+**Azure Portal:**
+
+1. From the Bot service resource in the Azure Portal, navigate to `Settings/Configuration` and `Add OAuth Connection settings`.
+2. Provide a name for your connection e.g. `graph`, and select the _Service Provider_ `Azure Active Directory v2`
+3. Populate the `TenantId`/`ClientId`/`ClientSecret` from the values obtained in the previous section. Configure the Token Exchange URL with the Application ID URI (e.g. `api://`), and add the Scopes you need e.g. `User.Read`
+
+![ABS OAuth connection](/screenshots/abs-oauth-connection.png)
+
+**Azure CLI:**
+
+Use the `az bot authsetting create` command to create the OAuth connection. The `--setting-name` is the OAuth connection name — `"graph"` is used here as an example since Microsoft Graph is the most common scenario. Replace the other placeholders with your values:
+
+```bash
+az bot authsetting create \
+  --resource-group $resourceGroup \
+  --name $botName \
+  --setting-name "graph" \
+  --client-id $appId \
+  --client-secret $clientSecret \
+  --provider-scope-string "User.Read" \
+  --service "Aadv2" \
+  --parameters tenantId=$tenantId tokenExchangeUrl=api://botid-$appId
+```
+
+:::tip
+To include additional permissions (Graph, SharePoint, etc.), space-delimit them: `"User.Read Mail.Read Sites.Read.All"`.
+:::
+
+## Configure the App Manifest
+
+The Teams application manifest needs to be updated to include `webApplicationInfo` with the `Application Id` and `Application ID URI`.
+
+**Manifest JSON:**
+
+Add `*.botframework.com` to `validDomains` and add the `webApplicationInfo` section to your `manifest.json`:
+
+```json
+"validDomains": [
+    ...
+    // highlight-next-line
+    "*.botframework.com"
+ ],
+ // highlight-start
+ "webApplicationInfo": {
+    "id": "",
+    "resource": "api://"
+  }
+ // highlight-end
+```
+
+**Teams Developer CLI:**
+
+:::note
+This option is available if your app was created using the Teams Developer CLI.
+:::
+
+You can set the `webApplicationInfo` fields directly without downloading and re-uploading the manifest:
+
+```bash
+teams app update $teamsAppId \
+  --web-app-info-id "$appId" \
+  --web-app-info-resource "api://botid-$appId"
+```
+
+You can then verify the full SSO configuration with the doctor command:
+
+```bash
+teams app doctor $teamsAppId
+```
+
+Expected — all SSO checks pass:
+- Identifier URI: `api://botid-<appId>` ✔
+- `access_as_user` scope ✔
+- Teams clients pre-authorized ✔
+- Bot Framework redirect URI present ✔
+- OAuth connection — URIs aligned ✔
+
+## Cross-Tenant Considerations
+
+If your Entra auth app lives in a different tenant than where the Teams app is installed, see [Cross-Tenant Considerations](#sso-troubleshooting) in the troubleshooting guide.
+
+## Troubleshooting
+
+If you encounter SSO errors, see the [Troubleshooting](#sso-troubleshooting) guide for common issues and solutions.
+
+---
+
+### Set up Agentic Users
+
+# Set up Agentic Users
+
+## 1. Set up an AI teammate
+
+Follow [Set up an agent blueprint](https://learn.microsoft.com/microsoft-agent-365/developer/registration) and select the AI teammate setup.
+
+To run a config-free setup, provide an agent name:
+
+```powershell
+a365 setup all `
+  --agent-name "MyAgent" `
+  --aiteammate
+```
+
+## 2. Configure Teams SDK
+
+Configure Teams SDK with the blueprint identity. It uses the same authentication settings as a standard Teams app, and the blueprint ID is the application (client) ID.
+
+| Agent 365 value      | App authentication setting                                                       |
+| -------------------- | -------------------------------------------------------------------------------- |
+| Blueprint ID         | Application (client) ID (`CLIENT_ID`)                                            |
+| Blueprint credential | Client secret, user-assigned managed identity, or federated identity credentials |
+| Tenant ID            | Tenant ID (`TENANT_ID`)                                                          |
+
+Configure these values as described in App Authentication.
+
+## 3. Deploy and register the messaging endpoint
+
+Deploy your Teams SDK app to a publicly accessible host, then [register its messaging endpoint](https://learn.microsoft.com/microsoft-agent-365/developer/agent-messaging-endpoint), typically `https://<host>/api/messages`.
+
+```powershell
+a365 setup blueprint --endpoint-only `
+  --messaging-endpoint "https://<host>/api/messages"
+```
+
+## 4. Publish and create an instance
+
+1. Run `a365 publish` to create the agent package.
+2. Follow [Publish the agent](https://learn.microsoft.com/microsoft-agent-365/developer/publish) to upload the package to the Microsoft 365 admin center.
+3. [Create an agent instance](https://learn.microsoft.com/microsoft-agent-365/developer/create-instance).
+
+After the instance is approved, its Agentic User can communicate through the deployed Teams SDK app.
+
+---
+
+### Sovereign Cloud Configuration
+
+# Sovereign Cloud Configuration
+
+:::info
+Most developers do not need this page. It applies only to bots deployed in US Government (GCC-High, DoD) or China (21Vianet) cloud environments. If your bot runs in the standard commercial cloud, no additional configuration is needed.
+:::
+
+Sovereign clouds use separate Azure infrastructure with different service endpoints for authentication, token services, and bot communication. The Teams SDK handles this automatically when you specify your cloud environment.
+
+## Supported Clouds
+
+| Cloud | Value | Azure Portal | Teams Client |
+|-------|-------|-------------|-------------|
+| Public (default) | `Public` | portal.azure.com | teams.microsoft.com |
+| US Gov (GCCH) | `USGov` | portal.azure.us | gov.teams.microsoft.us |
+| US Gov (DoD) | `USGovDoD` | portal.azure.us | dod.teams.microsoft.us |
+| China (21Vianet) | `China` | portal.azure.cn | n/a |
+
+## Prerequisites
+
+- A Teams tenant in the corresponding cloud environment
+- An Azure Bot resource and app registration in the sovereign cloud portal
+
+## Configuration
+
+**SDK 2.0 (Legacy):**
+
+The configuration below is only valid for **SDK 2.0** apps. It uses SDK 2.0 `Teams:Cloud` presets and per endpoint overrides. 
+In `appsettings.json`:
+
+```json
+{
+  "Teams": {
+    "ClientId": "your-client-id",
+    "ClientSecret": "your-client-secret",
+    "TenantId": "your-tenant-id",
+    "Cloud": "USGov",
+    "LoginTenant": "your-tenant-id"
+  }
+}
+```
+
+Or programmatically:
+
+```csharp
+var app = new App(new AppOptions
+{
+    Cloud = CloudEnvironment.USGov,
+    Credentials = new ClientCredentials("client-id", "client-secret")
+});
+```
+
+**Available cloud presets:** `CloudEnvironment.Public`, `CloudEnvironment.USGov`, `CloudEnvironment.USGovDoD`, `CloudEnvironment.China`
+
+Available override properties: `LoginEndpoint`, `LoginTenant`, `BotScope`, `TokenServiceUrl`, `OpenIdMetadataUrl`, `TokenIssuer`, `GraphScope`
+
+**SDK 2.1 (current):**
+
+For 2.1, configure sovereign cloud endpoints as shown below.
+
+```json title="Properties/launchSettings.json (US Gov example)"
+{
+  "profiles": {
+    "YourBot": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "AzureAd__Instance": "https://login.microsoftonline.us/",
+        "AzureAd__TenantId": "your-tenant-id",
+        "AzureAd__ClientId": "your-client-id",
+        "BotFramework__OpenIdMetadataUrl": "https://login.botframework.azure.us/v1/.well-known/openid-configuration",
+        "BotFramework__BotTokenIssuer": "https://api.botframework.us"
+      }
+    }
+  }
+}
+```
+
+For deployed environments, set equivalent values via app configuration or environment variables. When these aren't set, the SDK defaults to public-cloud endpoints.
+
+## What the SDK Configures Automatically
+
+When you set a cloud environment, the SDK automatically uses the correct endpoints for:
+
+- **Login authority**: where tokens are acquired (e.g. `login.microsoftonline.us` for GCCH)
+- **Bot token scope**: the OAuth scope for bot-to-service communication
+- **Token service URL**: where user OAuth tokens are managed
+- **JWT validation**: the signing keys and issuers used to verify inbound activity tokens
+- **OpenID metadata**: the discovery endpoint for token validation configuration
+
+You do not need to configure these endpoints individually.
+
+## Next Steps
+
+After configuring your cloud environment, your bot will authenticate and communicate using the correct sovereign cloud endpoints. No other code changes are needed; OAuth flows and all other SDK features work identically across clouds.
+
+## Troubleshooting
+
+### Bot fails to acquire a token at startup
+
+**Symptom:** The SDK logs `AADSTS500011` (resource principal not found) or `AADSTS700016` (application not found in directory) when the app starts.
+
+**Cause:** The bot's app registration lives in the wrong cloud's tenant. Sovereign clouds (USGov, USGovDoD, China) have separate Azure AD instances from the public cloud, and an app registered in the commercial cloud cannot authenticate to a sovereign tenant (and vice versa).
+
+**Fix:** Register the bot in the sovereign cloud portal that matches your `cloud` setting. For USGov/DoD use `portal.azure.us`, for China use `portal.azure.cn`.
+
+### Inbound activities are rejected with "issuer mismatch" or "audience invalid"
+
+**Symptom:** Token validation fails on inbound `/api/messages` requests. Logs show `IDX10204` or `IDX10214`.
+
+**Cause:** The bot is configured for the wrong cloud, so its JWT validator expects tokens signed by a different issuer than the one your sovereign Bot Channel Service uses.
+
+**Fix:** Confirm the `cloud` setting matches the cloud your Azure Bot resource was created in. The SDK derives the expected issuer and JWKS URI from this setting; mismatching the cloud breaks token validation even when the credentials are otherwise valid.
+
+### China bots fail user OAuth flows with the multi-tenant login URL
+
+**Symptom:** OAuth or user-token flows fail in China with login redirects that do not resolve.
+
+**Cause:** China sovereign cloud does not have a stable multi-tenant login alias. Single-tenant bots must point to their specific tenant explicitly via a `LoginTenant` override.
+
+**Fix:** Override `loginTenant` on the China preset to your tenant ID.
+
+For other authentication errors not specific to sovereign clouds, see the [App Authentication](#app-authentication) guide.
+
+---
+
+### Static Pages
+
+# Static Pages
+
+The `App` class lets you host web apps in the agent. This is useful for an efficient inner loop — you can build, deploy, and sideload both an agent and a Tab app inside Teams in a single step. It's also useful in production, since it makes it straightforward to host a simple experience such as an agent configuration page or a Dialog.
+
+To host a static tab web app, call the SDK 2.0 `app.AddTab()` helper or SDK 2.1 ASP.NET route mapping with `app.MapGet(...)` function and provide an app name and a path to a folder containing an `index.html` file to be served up.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.AddTab("myApp", "Web/bin");
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using Microsoft.AspNetCore.StaticFiles;
+
+FileExtensionContentTypeProvider contentTypes = new();
+
+app.MapGet("/tabs/myApp", () =>
+{
+    string index = Path.Combine(Directory.GetCurrentDirectory(), "Web", "bin", "index.html");
+    contentTypes.TryGetContentType(index, out string? ct);
+    return Results.File(File.OpenRead(index), ct ?? "text/html");
+});
+
+app.MapGet("/tabs/myApp/{*path}", (string? path) =>
+{
+    string root = Path.Combine(Directory.GetCurrentDirectory(), "Web", "bin");
+    string full = Path.Combine(root, path ?? "index.html");
+    contentTypes.TryGetContentType(full, out string? ct);
+    return Results.File(File.OpenRead(full), ct ?? "text/html");
+});
+```
+
+This registers a route that is hosted at `http://localhost:PORT/tabs/myApp` or `https://BOT_DOMAIN/tabs/myApp`.
+
+## Additional resources
+
+- For more details about Tab apps, see the [Tabs](#tabs) in-depth guide.
+- For an example of hosting a Dialog, see the [Creating Dialogs](#creating-dialogs) in-depth guide.
+
+---
+
+### Teams Core Concepts
+
+# Teams Core Concepts
+
+Running an agent on Teams involves several moving pieces — an app registration, an Azure or Teams-managed bot, a public messaging endpoint, and a sideloaded app package. Understanding these components helps you debug and deploy your agent confidently. The [Teams Developer CLI](#teams-developer-cli) automates all of them with a single `teams app create` command, but it's worth knowing what it sets up underneath.
+
+## Basic Flow
+
+```mermaid
+flowchart LR
+    %% Main actors
+    User([User])
+
+    %% Teams section
+    subgraph Teams ["Teams"]
+        TeamsClient["Teams Client"]
+        TeamsBackend["Teams Backend"]
+    end
+
+    %% Azure section
+    subgraph Azure ["Azure"]
+        AppReg["App Registration"]
+        AzureBot["Azure Bot"]
+    end
+
+    %% Local Server section
+    subgraph LocalServer ["Local Server"]
+        DevTunnel["DevTunnel"]
+        LocalApp["Your local application"]
+    end
+
+    %% Deployed Server section
+    subgraph DeployedServer ["Deployed Server"]
+        DeployedApp["Your deployed application"]
+    end
+
+    %% Define connections
+    User <--> TeamsClient
+    TeamsClient <--> TeamsBackend
+    TeamsBackend <--> AppReg
+    AppReg <--> AzureBot
+    AzureBot --> LocalServer
+    AzureBot --> DeployedServer
+```
+
+**Teams**
+
+- Teams Client: User-facing agent that interacts with the user.
+- Teams Backend: Part of your app package; includes a manifest with your app’s client ID.
+
+**Azure**
+
+- App Registration: Contains a unique client ID and secret for your app.
+- Azure Bot: Connects your app to Teams; contains a pointer to your HTTPS URL.
+
+**Local Server**
+
+- Dev Tunnel: Public-facing HTTPS tunnel to expose your local machine.
+- Local App: Your application running locally; handles events from Teams and sends responses.
+
+**Deployed Server**
+
+- Deployed App: Your app deployed to the cloud with a public HTTPS endpoint; also interacts with Teams.
+
+## Core Concepts
+
+When working with Teams, these are the key concepts. Keep in mind, this is a simplified view of the architecture.
+
+- Teams Client: This is the Teams application where users interact with your agent. This can be the desktop app, web app, or mobile app.
+- Teams Backend: This service handles all the Teams-related operations, including keeping a record of your manifest, and routing messages from your agent to the Azure bot service.
+- App Registration: This is the registration of your agent in Azure. This Application Registration issues a unique client ID for your application and a client secret. This is used to authenticate your agent application with the Teams backend and other Azure services (including Graph if you are using it).
+- Azure Bot Service: This is the service that handles all the bot-related operations, including routing messages from Teams to your agent and vice versa. This holds the URL to your agent application.
+- DevTunnel: This is a service that creates a public facing URL to your locally running application. Azure Bot Service requires that you have a public facing https URL to your agent application.
+- Local Agent Application: This is your agent application running on your local machine.
+- Deployed Agent Application: This is your deployed agent which probably has a public facing URL.
+
+## DevTunnel
+
+[DevTunnel](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview) is a critical component that makes your locally running agent accessible to Teams: it creates a secure public HTTPS endpoint that forwards to your local server so Teams can route messages and events to it. DevTunnel is only one way to do this — ngrok works too.
+
+For setup steps, the plain-HTTP protocol gotcha, verification, and security notes, see [Local Tunnels](#exposing-your-local-app-with-a-tunnel).
+
+## Teams App Provisioning
+
+Before your agent can interact with Teams, it needs to be properly registered and configured. This step handles creating or updating the App Registration and creating or registering the Azure Bot instance in Azure.
+
+### App Registration
+
+- Creates an App ID (i.e. Client ID) in the Teams platform
+- Sets up a bot registration with the Bot Framework
+- Creates a client secret that your agent can use to authenticate to send and receive messages. The [Teams Developer CLI](#teams-developer-cli) writes this value to `.env` (or `appsettings.json` for C#) automatically when you run `teams app create`.
+
+### Azure Bot
+
+- Creates an Azure Bot resource (with `--azure`) or a Teams-managed bot registration (default)
+- Associates the bot with your App Registration
+- Configures the messaging endpoint to point to your DevTunnel (or public URL if deployed)
+
+## Sideloading Process
+
+Sideloading is the process of installing your agent in Teams. You are able to pass in the manifest and icons (zipped up) to the Teams client. Sideloading an application automatically makes that application available to you. You are also able to sideload the application in a Team or a Group chat. In this case, the application will be available to all members of that Team or Group chat.
+
+:::warning
+Sideloading needs to be enabled in your tenant. If this is not the case, then you will need to contact your Teams administrator to enable it.
+:::
+
+## Provisioning and Deployment
+
+To test your app in Teams you need, at minimum, a provisioned bot. You'll likely also have other resources such as storage.
+
+The fastest path is `teams app create`, which provisions a Teams-managed bot by default — no Azure subscription required. See the [Quickstart: Register your app](#quickstart-register-your-app).
+
+If you need OAuth or SSO (typically for delegated Microsoft Graph access on behalf of a user), the bot must be Azure-managed. Either start with `teams app create --azure --subscription <id> --resource-group <rg>`, or start Teams-managed and switch later with `teams app bot migrate <appId> --subscription <id> --resource-group <rg>` (both require an Azure subscription) — your `CLIENT_ID`, `CLIENT_SECRET`, and `TENANT_ID` stay the same. For a hand-rolled Azure setup, follow the [Azure Configuration](#azure-configuration) guide.
+
+For deploying your bot's endpoint to App Service, Container Apps, or other Azure compute, see the Microsoft Learn [deployment overview](https://learn.microsoft.com/en-us/microsoftteams/deploy-overview).
+
+---
+
+### Teams Developer CLI
+
+# Teams Developer CLI
+
+The Teams Developer CLI documentation has moved to its own section.
+
+**[Go to CLI Documentation](#teams-developer-cli)**
+
+---
+
+### Agent Skills
+
+# Agent Skills
+
+[Agent Skills](https://aka.ms/teams-agent-skills) give AI coding assistants relevant context for specific development tasks. The `teams-dev` skill is the go-to agent skill for Teams bot development. It gives AI coding assistants (Claude Code, Cursor, GitHub Copilot, and others) relevant context to assist in developing Teams bots and use the Teams Developer CLI to manage your bot infrastructure. Instead of running CLI commands manually, you describe what you want and your AI assistant handles the rest.
+
+:::note Alternative: Use llms.txt directly
+If you'd rather not install a skill, you can provide the same context by pointing your AI tool to the llms.txt URL:
+
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms.txt
+```
+
+:::
+
+## Install the `teams-dev` skill
+
+**GitHub Copilot CLI:**
+
+Add the marketplace (first time only):
+
+```
+/plugin marketplace add microsoft/teams-sdk
+```
+
+Install the skill:
+
+```
+/plugin install teams-sdk@teams-skills
+```
+
+After installing, restart GitHub Copilot for the skills to load.
+
+**Claude Code:**
+
+Add the marketplace (first time only):
+
+```
+/plugin marketplace add microsoft/teams-sdk
+```
+
+Install the skill:
+
+```
+/plugin install teams-sdk@teams-skills
+```
+
+After installing, restart Claude Code for the skills to load.
+
+**VS Code:**
+
+See [VS Code Agent Skills documentation](https://code.visualstudio.com/docs/copilot/customization/agent-skills#_use-shared-skills) for installation instructions.
+
+**Cursor:**
+
+See [Cursor Skills documentation](https://cursor.com/docs/skills#installing-skills-from-github) for installation instructions.
+
+## What the skill covers
+
+The `teams-dev` skill guides your AI assistant through:
+
+| Task                          | What it does                                                                      |
+| ----------------------------- | --------------------------------------------------------------------------------- |
+| **Manage bot infrastructure** | Register your bot with Teams, manage credentials, and update configuration        |
+| **Develop Teams bot**         | Build bot applications from scratch or add Teams capabilities to existing servers |
+| **Set up SSO**                | Enable Single Sign-On so users can authenticate seamlessly without login prompts  |
+| **Troubleshoot**              | Diagnose and resolve common bot setup and configuration issues                    |
+
+The skill does **not** cover hosting or deployment — it focuses on bot registration, development, and configuration.
+
+## Invoke the skill
+
+**Using natural language:**
+
+- "I need a chatbot for my team's standup meetings"
+- "Help me build a Teams bot that can answer FAQs"
+- "My bot won't load in Teams, can you help?"
+- "Add the ability to get user profile information to my bot"
+
+The skill loads automatically when your agent detects a relevant request.
+
+**Direct invocation:**
+
+```
+/teams-dev
+```
+
+## Example session
+
+```
+You: Help me create a Teams bot that echoes what I'm saying back to me
+
+Agent: I'll create an echo bot for you.
+
+       [checks Teams Developer CLI installation and authentication]
+       [creates development tunnel: https://abc123.ngrok.io]
+       [runs teams app create with endpoint]
+       ✓ Bot registered, credentials saved to .env
+
+       [runs teams project new typescript echo-bot -t echo]
+       ✓ Bot code created in ./echo-bot
+
+       [installs dependencies and starts bot server]
+       ✓ Bot running at http://localhost:3978
+
+       Your bot is ready! Install it in Teams:
+       https://teams.microsoft.com/l/app/[app-id]
+```
+
+## Requirements
+
+- Teams Developer CLI installed (`npm install -g @microsoft/teams.cli`)
+- Node.js 22.12 or later
+- Microsoft 365 account with sideloading enabled
+
+---
+
+### Agentic Identity
+
+# Agentic Identity
+
+:::note Availability
+Agentic Identity support is available in Teams SDK v2.1 for C#.
+:::
+
+These guides show how to connect a Teams SDK app to an **Agentic User**—an AI teammate represented by its own Microsoft Entra user account.
+
+## Identity model
+
+An Agentic Blueprint defines the shared credentials and baseline permissions for a type of agent. One blueprint can be used to create multiple Agentic User instances.
+
+```mermaid
+flowchart LR
+  B[Agentic Blueprint ID<br/>shared credentials and permissions]
+  B --> U1[Agentic User instance A]
+  B --> U2[Agentic User instance B]
+```
+
+One blueprint can support multiple independently managed Agentic Users while the same Teams SDK app handles their messages.
+
+For background on blueprints, agent identities, and authentication modes, see [Agent 365 identity](https://learn.microsoft.com/microsoft-agent-365/developer/identity?view=o365-worldwide).
+
+The guides show how to:
+
+- Receive messages addressed to an Agentic User.
+- Reply with the correct Agentic User identity.
+- Send proactive messages with an explicit agent identity.
+- Handle Agentic User lifecycle events.
+- Add Agent 365 identity and correlation context to telemetry.
+
+---
+
+### Code Basics
+
+# Code Basics
+
+After following the guidance in [the quickstart](#quickstart) to create your first Teams application, let's review its structure and key components. This knowledge can help you build more complex applications as you progress.
+
+## Project Structure
+
+When you create a new Teams application, it generates a directory with this basic structure:
+
+```
+QuoteAgent/
+├── Program.cs        # Main application startup code
+├── appsettings.json    # Configuration (logging, auth, etc.)
+```
+
+- **Program.cs**: The entry point. A standard ASP.NET Core app that registers the Teams application into DI and wires it into the request pipeline.
+- **appsettings.json**: Standard ASP.NET Core configuration — logging levels, bot credentials.
+
+## Core Components
+
+Let's break down the simple application from the [quickstart](#quickstart) into its core components.
+
+### The App Class
+
+The heart of an application is the `App` class. This class handles all incoming activities and manages the application's lifecycle. It also acts as a way to host your application service.
+
+**SDK 2.0 (Legacy):**
+
+```csharp title="Program.cs"
+using Microsoft.Teams.Apps.Activities;
+using Microsoft.Teams.Apps.Extensions;
+using Microsoft.Teams.Plugins.AspNetCore.Extensions;
+
+var builder = WebApplication.CreateBuilder(args);
+builder.AddTeams();
+var app = builder.Build();
+var teams = app.UseTeams();
+
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    await context.Typing(cancellationToken: cancellationToken);
+    await context.Send($"you said '{context.Activity.Text}'", cancellationToken);
+});
+
+app.Run();
+```
+
+The app configuration includes a variety of options that allow you to customize its behavior, including controlling the underlying server, authentication, and other settings.
+
+**SDK 2.1 (current):**
+
+```csharp title="Program.cs"
+using Microsoft.Teams.Apps;
+
+WebApplicationBuilder builder = WebApplication.CreateSlimBuilder(args);
+builder.Services.AddTeamsBotApplication();
+WebApplication app = builder.Build();
+
+TeamsBotApplication teams = app.UseTeamsBotApplication();
+
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    await context.TypingAsync(cancellationToken);
+    await context.SendAsync($"you said '{context.Activity.Text}'", cancellationToken);
+});
+
+app.Run();
+```
+
+`AddTeamsBotApplication()` registers everything the SDK needs into dependency injection. `UseTeamsBotApplication()` wires it into the ASP.NET Core pipeline and maps the `POST /api/messages` endpoint. From there, you register handlers for the activity types you care about.
+
+### Plugins
+
+:::note[Removed in SDK 2.1]
+Plugins have been removed in SDK 2.1. Because your app is a standard ASP.NET Core app, extend it with regular **middleware** and **dependency injection** instead — for per-turn logic, implement `ITurnMiddleware` and register it with `teams.UseMiddleware(...)`.
+:::
+
+### Message Handling
+
+Teams applications respond to various types of activities. The most basic is handling messages:
+
+**SDK 2.0 (Legacy):**
+
+```csharp title="Program.cs"
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    await context.TypingAsync(cancellationToken: cancellationToken);
+    await context.SendAsync($"you said \"{context.Activity.Text}\"", cancellationToken);
+});
+```
+
+**SDK 2.1 (current):**
+
+```csharp title="Program.cs"
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    await context.TypingAsync(cancellationToken);
+    await context.SendAsync($"you said \"{context.Activity.Text}\"", cancellationToken);
+});
+```
+
+You can also match specific messages with a regular expression — `teams.OnMessage("(?i)^help$", ...)` only fires for a case-insensitive `help`.
+
+This code:
+
+1. Listens for all incoming messages using the `OnMessage` handler.
+2. Sends a typing indicator, which renders as an animated ellipsis (…) in the chat.
+3. Responds by echoing back the received message.
+
+:::info
+Each activity type has a dedicated handler method (`OnMessage`, `OnMessageReaction`, `OnMembersAdded`, and so on) for type-safe, readable routing.
+:::
+
+### Application Lifecycle
+
+Your application starts when you run:
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+WebApplication app = builder.Build();
+app.UseTeamsBotApplication();
+app.Run();
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+WebApplication app = builder.Build();
+app.UseTeamsBotApplication();
+app.Run();
+```
+
+This code initializes your application server and, when configured for Teams, also authenticates it to be ready for sending and receiving messages.
+
+## Next Steps
+
+Now that you understand the basic structure of your Teams application, you're ready to [run it in Teams](running-in-teams). You'll use the Teams Developer CLI to register your bot and sideload it into Teams.
+
+After that, you can:
+
+- Add more activity handlers for different types of interactions. See [Listening to Activities](#listening-to-activities) for more details.
+- Integrate with external services using the [API Client](#teams-api-client).
+- Add interactive [cards](#adaptive-cards) and [dialogs](#dialogs).
+
+Continue on to the next page to learn about these advanced features.
+
+## Other Resources
+
+- [Essentials](#essentials)
+- [Teams concepts](#client-secret-authentication-setup)
+- [Teams developer tools](#teams-developer-cli)
+
+---
+
+### Dialogs
+
+# Dialogs
+
+Dialogs are a helpful paradigm in Teams which improve interactions between your agent and users. When dialogs are **invoked**, they pop open a window for a user in the Teams client. The content of the dialog can be supplied by the agent application.
+
+:::note
+In Teams client v1, dialogs were called task modules. They may occasionaly be used synonymously.
+:::
+
+## Key benefits
+
+1. Dialogs pop open for a user in the Teams client. This means in group-settings, dialog actions are not visible to other users in the channel, reducing clutter.
+
+2. Interactions like filling out complex forms, or multi-step forms where each step depends on the previous step are excellent use cases for dialogs.
+
+3. The content for the dialog can be hard-coded in, or fetched at runtime. This makes them extremely flexible and powerful.
+
+## Resources
+
+- [Task Modules](https://learn.microsoft.com/en-us/microsoftteams/platform/task-modules-and-cards/what-are-task-modules)
+- [Invoking Task Modules](https://learn.microsoft.com/en-us/microsoftteams/platform/task-modules-and-cards/task-modules/invoking-task-modules)
+
+---
+
+### Enhance the Teams Experience
+
+# Enhance the Teams Experience
+
+:::warning[Our AI libraries are deprecated]
+The Teams SDK has deprecated its own AI libraries — the `@microsoft/teams.ai` packages (`ChatPrompt`, `Model`, and the older `@microsoft/teams.mcp` / `@microsoft/teams.a2a` plugins) — in favor of dedicated AI frameworks. Use the pattern shown in these guides instead: bring the OpenAI SDK (or any framework you like), and wire MCP and A2A directly into your Teams app.
+:::
+
+:::warning[SDK 2.0 AI libraries are deprecated]
+For .NET, implement AI enhancements with SDK 2.1 plus external model/agent frameworks. The Teams SDK provides the chat/activities surface; your AI stack provides reasoning/tool orchestration.
+:::
+
+You can enrich the agent output into a more Teams-native ex

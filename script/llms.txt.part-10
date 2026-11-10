@@ -1,0 +1,696 @@
+icrosoft.com/en-us/microsoftteams/platform/bots/how-to/conversations/conversation-messages#use-picture-messages) documents the platform-side picture limits.
+- [Add media attachments to messages](https://learn.microsoft.com/en-us/azure/bot-service/rest-api/bot-framework-rest-connector-add-media-attachments?view=azure-bot-service-4.0) documents the underlying attachment wire format.
+
+---
+
+### Sending Messages
+
+# Sending Messages
+
+Sending messages is a core part of an agent's functionality. With all activity handlers, a `send` method is provided which allows your handlers to send a message back to the user to the relevant conversation.
+
+:::info[SDK 2.1]
+In SDK 2.1, the per-turn `context.Send`, `context.Reply`, and `context.Quote` helpers work the same way. The main difference is **streaming** — see the tabbed examples below.
+:::
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async (context, cancellationToken) =>
+{
+    await context.Send($"you said: {context.Activity.Text}", cancellationToken);
+});
+```
+
+**SDK 2.1+:**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    await context.SendAsync($"you said: {context.Activity.Text}", cancellationToken);
+});
+```
+
+In the above example, the handler gets a `message` activity, and uses the `send` method to send a reply to the user.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnVerifyState(async (context, cancellationToken) =>
+{
+    await context.Send("You have successfully signed in!", cancellationToken);
+});
+```
+
+You are not restricted to only replying to `message` activities. In the above example, the handler is listening to `OnVerifyState` events, which are sent when a user successfully signs in.
+
+**SDK 2.1+:**
+
+```csharp
+var flow = teams.GetOAuthFlow("graph");
+flow.OnSignInComplete(async (context, tokenResponse, cancellationToken) =>
+{
+    await context.SendAsync("You have successfully signed in!", cancellationToken);
+});
+```
+You are not restricted to only replying to `message` activities. In the above example, the handler is listening to `OnSignInComplete` events, which are sent when a user successfully signs in.
+
+:::tip
+This shows an example of sending a text message. Additionally, you are able to send back things like [adaptive cards](#adaptive-cards) by using the same `send` method. Look at the [adaptive card](#adaptive-cards) section for more details.
+:::
+
+## Streaming
+
+You may also stream messages to the user which can be useful for long messages, or AI generated messages. The SDK makes this simple for you by providing a `stream` function which you can use to send messages in chunks.
+
+Streaming changes how the response arrives, not how fast your agent produces it. Text appears incrementally as it is generated, so the user sees progress rather than a blank screen, and you can show a thinking or status indicator before any real output exists. A streamed response is also stoppable: when the user stops it, the SDK surfaces the cancellation to your handler so you can abandon the remaining work. The gain is in perceived time to first output, which is why streaming suits long or model generated replies and adds little to a short one you could simply send.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async (context, cancellationToken) =>
+{
+    context.Stream.Emit("hello");
+    context.Stream.Emit(", ");
+    context.Stream.Emit("world!");
+    // result message: "hello, world!"
+    return Task.CompletedTask;
+});
+```
+
+**SDK 2.1+:**
+
+The 2.1 streams through a `TeamsStreamingWriter`. Create one from the turn context, push informative updates and response chunks, then finalize:
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    TeamsStreamingWriter writer = TeamsStreamingWriter.CreateFromContext(context);
+
+    await writer.SendInformativeUpdateAsync("Thinking…", cancellationToken);
+
+    await writer.AppendResponseAsync("hello", cancellationToken);
+    await writer.AppendResponseAsync(", ", cancellationToken);
+    await writer.AppendResponseAsync("world!", cancellationToken);
+
+    // flush the accumulated text as the final message: "hello, world!"
+    await writer.FinalizeResponseAsync(cancellationToken: cancellationToken);
+});
+```
+
+:::note
+Streaming is currently only supported in 1:1 conversations, not group chats or channels. Teams also supports only one concurrent streaming response per chat at a time.
+
+Every inbound activity gets its own stream, and the SDK closes that stream at the end of the turn. It does not serialize turns, though, and handlers can run concurrently, so a second activity can arrive while the first is still streaming. Streaming therefore brings message handling concurrency concerns that do not exist when you just send a reply, and resolving them may be implemented in your custom code by serializing turns per conversation or by finalizing the in-flight stream before starting the next one.
+:::
+
+![Animated image showing agent response text incrementally appearing in the chat window.](/screenshots/streaming-chat.gif)
+
+### Informative updates and stopping a stream
+
+An informative update shows a status line such as "Thinking..." while the agent works, before any response text exists.
+
+`writer.SendInformativeUpdateAsync()` sends an informative update.
+It throws `InvalidOperationException` once the first response chunk has been sent.
+The SDK learns that the user stopped the stream from the answer to a chunk it sends.
+From then on `writer.Cancelled` is true, and `AppendResponseAsync()`, `SendInformativeUpdateAsync()` and `FinalizeResponseAsync()` return without sending.
+`FinalizeResponseAsync()` also accepts a final activity that carries only attachments, and sends it as a new message when no streamed message exists.
+
+### Chunk pacing and retries
+
+You do not need to throttle your own chunks. Rapid `writer.AppendResponseAsync()` calls are coalesced and spaced roughly 500 milliseconds apart, so a token-by-token loop becomes a couple of network calls per second rather than one call per token. Every streamed chunk carries the full text accumulated so far rather than just the newest delta, so collapsing several chunks into one send never loses content. Wrapping your own throttle or sleep around each chunk mostly slows the response down, since it would be pacing a path that is already paced.
+
+This describes the SDK 2.1 `TeamsStreamingWriter`.
+
+`writer.AppendResponseAsync()` sends inline rather than queueing: it is awaited, and it makes the HTTP call itself. Every call appends your chunk to the accumulated buffer, but if less than 500ms has passed since the last chunk went out it returns without sending, and that gate is what keeps a fast loop from flooding the streaming API.
+
+Because the gate has no trailing timer, a burst that ends inside that 500ms window leaves its final delta buffered but not yet on screen. It goes out with the next `AppendResponseAsync()` that clears the gate, or with `FinalizeResponseAsync()`, so no text is lost, though the tail of a short response can appear only once the stream finalizes.
+
+`TeamsStreamingWriter` does not retry. Each chunk is a single attempt, so a transient failure is not retried for you. A timed out or cancelled stream is handled internally, and any other streaming error is thrown to your handler.
+
+None of this extends the [two minute window](#the-two-minute-streaming-limit), which runs on wall clock from the first chunk. Pacing keeps a stream under the streaming API's rate limit, but does not buy more time. It also applies only to the streaming path: the plain activity updates go out exactly when they are sent, so that cadence stays yours to manage.
+
+### The two minute streaming limit
+
+Teams keeps a message stream open for two minutes, measured from its first chunk. After that the service rejects further chunks for that message with a `403` and the [error code](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/streaming-ux#error-codes) `ContentStreamNotAllowed` (`Content stream finished due to exceeded streaming time.`).
+
+However, hitting the limit does not mean the response is lost. The SDK marks the stream as timed out and stops pushing chunks, but it keeps buffering everything your agent produces, and `writer.FinalizeResponseAsync()` finalizes by updating the original message in place with the full buffered text. 
+
+:::warning
+The two minute clock starts on the **first streamed chunk**, and an informative update (`writer.SendInformativeUpdateAsync()`) is a chunk. An agent that posts a status update immediately and then thinks for three minutes has spent its entire window before emitting a single token. When the slow work happens before you have any output, do that work first and open the stream once real content starts.
+:::
+
+### Running longer than two minutes
+
+To outlast the window, hand off before it closes: stream normally, then finalize the stream and continue the response growing with plain activity updates. No streaming window applies to plain updates, so the answer can keep arriving for as long as your agent runs.
+
+This pattern uses the SDK 2.1 `TeamsStreamingWriter`. There is no SDK 2.0 (Legacy) variant on this page.
+
+`FinalizeResponseAsync` does not return the finalized message, so the id of the streamed message is not available to the caller. The continuation is therefore sent as one follow-up message, which is then edited in place for the rest of the run. That follow-up carries only the text produced after the handoff, because the streamed message already published everything before it, so the two messages read in sequence.
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    TeamsStreamingWriter writer = TeamsStreamingWriter.CreateFromContext(context);
+    string conversationId = context.Activity.Conversation.Id;
+
+    StringBuilder continuation = new();
+    DateTimeOffset? opened = null;
+    bool handedOff = false;
+    string? messageId = null;
+    DateTimeOffset lastEdit = DateTimeOffset.MinValue;
+
+    await foreach (string chunk in RunAgentAsync(context.Activity.Text, cancellationToken))
+    {
+        // Phase 1: real streaming. The window opens on the first streamed chunk,
+        // not when the handler starts, so the clock starts here.
+        if (!handedOff && (opened is null || DateTimeOffset.UtcNow - opened < TimeSpan.FromSeconds(110)))
+        {
+            opened ??= DateTimeOffset.UtcNow;
+            await writer.AppendResponseAsync(chunk, cancellationToken);
+            continue;
+        }
+
+        // This chunk was never streamed, so it belongs to the continuation.
+        continuation.Append(chunk);
+
+        // Hand off once: finalize the streamed message, then open the follow-up that carries the rest.
+        if (!handedOff)
+        {
+            await writer.FinalizeResponseAsync(cancellationToken: cancellationToken);
+            handedOff = true;
+
+            SendActivityResponse? sent = await context.SendAsync(
+                new MessageActivityInput().WithText(continuation.ToString()), cancellationToken);
+
+            messageId = sent?.Id;
+            lastEdit = DateTimeOffset.UtcNow;
+            continue;
+        }
+
+        // Phase 2: plain edits on the follow-up. No two minute ceiling.
+        if (messageId is not null && DateTimeOffset.UtcNow - lastEdit > TimeSpan.FromSeconds(3))
+        {
+            await context.Api.Conversations.UpdateActivityAsync(
+                conversationId,
+                messageId,
+                new MessageActivityInput().WithText(continuation.ToString()),
+                cancellationToken: cancellationToken);
+
+            lastEdit = DateTimeOffset.UtcNow;
+        }
+    }
+
+    if (!handedOff)
+    {
+        await writer.FinalizeResponseAsync(cancellationToken: cancellationToken);
+    }
+    else if (messageId is not null)
+    {
+        await context.Api.Conversations.UpdateActivityAsync(
+            conversationId,
+            messageId,
+            new MessageActivityInput().WithText(continuation.ToString()),
+            cancellationToken: cancellationToken);
+    }
+});
+```
+
+`handedOff` decides whether the stream still needs finalizing, which is why it is tracked separately from `messageId`. The follow-up is sent exactly once, in the same iteration that sets `handedOff`, so a missing id cannot cause a second send. It does mean the continuation stops updating at that point: `SendAsync` returns `SendActivityResponse?` with a nullable `Id`, and if no id comes back there is no way to edit that message, nor does the SDK expose the finalized streamed message's id as a fallback.
+
+`context.SendAsync` always creates a new activity, even when the activity carries an id, so plain edits go through `context.Api.Conversations.UpdateActivityAsync`. Use `writer.TimedOut` to check whether the stream tripped the limit before you handed off.
+
+Plain updates are subject to ordinary activity throttling rather than the streaming path's allowance, so pace them at a cadence measured in seconds rather than sending one per token.
+
+### Starting another streamed message
+
+Calling `writer.AppendResponseAsync()` again after the stream has been closed posts a second, separate message in the conversation by reusing the SDK object in your custom handler; it clears its buffered state and starts the new message. The second message gets its own stream id, so it also gets its own fresh two minute window. The message already finalized stays finalized and is not reopened or extended. Use this when your agent has a genuinely separate second answer to stream, not as a way to give one response more time.
+
+### Streaming in threads
+
+The first message of a stream is placed the same way as a response sent with `SendAsync()`.
+See [Reactive Threading](#reactive-threading-within-a-handler) for the rules.
+In a 1:1 chat the stream starts in the thread when the inbound message is inside a thread, and at the top level otherwise.
+The SDK applies the same rules in channels: a channel stream starts in the thread of the inbound message.
+Without `channelData.replyChain.id` on the inbound activity, the stream is not placed in a reply chain.
+Teams itself supports streaming only in 1:1 chats, as noted above.
+
+Only the first chunk of each streamed message uses the reply chain route.
+The later chunks are sent to the inbound conversation with the stream id of the first message.
+In a 1:1 chat inside a thread, the streamed message appears in the thread pane (checked live with TypeScript and Python).
+In a channel, if the service answers 404 to the reply chain route, the first chunk falls back to the inbound conversation, as with `SendAsync()`, and stays in the thread.
+In a 1:1 chat, a failed reply chain route does not fall back.
+The first request of a streamed message can be sent by `writer.AppendResponseAsync()`, `writer.SendInformativeUpdateAsync()` or `writer.FinalizeResponseAsync()`, and each of these awaited calls throws an error from it.
+
+`TeamsStreamingWriter.CreateFromContext(context)` applies this placement.
+The options that carry it are internal, so there is no other way to start a writer in a reply chain.
+
+## @Mention
+
+Sending a message at `@mentions` a user is as simple including the details of the user using the `AddMention` method
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async (context, cancellationToken) =>
+{
+    await context.Send(new MessageActivity("hi!").AddMention(context.Activity.From), cancellationToken);
+});
+```
+
+**SDK 2.1+:**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    await context.SendAsync(
+        new MessageActivityInput()
+            .WithText("hi!")
+            .AddMention(context.Activity.From),
+        cancellationToken);
+});
+```
+
+## Targeted Messages
+
+Targeted messages, also known as ephemeral messages, are delivered to a specific user in a shared conversation. From a single user's perspective, they appear as regular inline messages in a conversation. Other participants won't see these messages, making them useful for authentication flows, help or error responses, personal reminders, or sharing contextual information without cluttering the group conversation.
+
+To send a targeted message when responding to an incoming activity, use the `WithRecipient` method with the recipient account and set the targeting flag to true.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async (context, cancellationToken) =>
+{
+    // Using WithRecipient with isTargeted=true explicitly targets the specified recipient
+    await context.Send(
+        new MessageActivity("This message is only visible to you!")
+            .WithRecipient(context.Activity.From, isTargeted: true),
+        cancellationToken
+    );
+});
+```
+
+**SDK 2.1+:**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    // Using WithRecipient with isTargeted=true explicitly targets the specified recipient
+    await context.SendAsync(
+        new MessageActivityInput()
+            .WithText("This message is only visible to you!")
+            .WithRecipient(context.Activity.From, isTargeted: true),
+        cancellationToken
+    );
+});
+```
+
+### Prompt Preview
+
+:::info[Coming Soon]
+Prompt Preview is coming soon in June 2026.
+:::
+
+Prompt Preview shows a compact, collapsible preview of the targeted message your agent is replying to, helping carry context from a private user-to-agent message into the reply.
+
+#### Prompt Preview in targeted reply
+
+In a targeted (private) reply, both the prompt preview and the bot response are visible only to the targeted user.
+
+![Prompt Preview in a targeted reply.](/screenshots/private-prompt-preview.png)
+
+#### Prompt Preview in public reply
+
+In a public reply, the same prompt preview appears above the bot response and is visible to everyone in the conversation.
+
+![Prompt Preview in a public reply.](/screenshots/public-prompt-preview.png)
+
+In reactive scenarios, when replying to an inbound targeted activity through `SendAsync()` or `ReplyAsync()`, the SDK automatically includes targeted message info.
+
+For proactive scenarios (using `app.SendAsync()`), attach targeted message info using the targeted message ID you are replying to.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+var targetedMessageId = "1772050244572";
+var conversationId = "19:groupchat-id@thread.v2";
+var userAccount = new Account
+{
+    Id = "29:1AbCDef...",
+    Name = "Adele Vance"
+};
+
+var targetedMessage = new MessageActivityInput()
+    .WithText("Here is the result!")
+    .AddTargetedMessageInfo(targetedMessageId)
+    .WithRecipient(userAccount, isTargeted: true);
+
+// Targeted reply (only the user sees it)
+await app.Send(conversationId, targetedMessage);
+
+// OR public reply (everyone sees it)
+var publicMessage = new MessageActivityInput()
+    .WithText("Here is the result!")
+    .AddTargetedMessageInfo(targetedMessageId);
+await app.Send(conversationId, publicMessage);
+```
+
+**SDK 2.1+:**
+
+```csharp
+var targetedMessageId = "1772050244572";
+var conversationId = "19:groupchat-id@thread.v2";
+var userAccount = new Account
+{
+    Id = "29:1AbCDef...",
+    Name = "Adele Vance"
+};
+
+var targetedMessage = new MessageActivity("Here is the result!")
+    .AddTargetedMessageInfo(targetedMessageId)
+    .WithRecipient(userAccount, isTargeted: true);
+
+// Targeted reply (only the user sees it)
+await app.Send(conversationId, targetedMessage);
+
+// OR public reply (everyone sees it)
+var publicMessage = new MessageActivity("Here is the result!")
+    .AddTargetedMessageInfo(targetedMessageId);
+await app.Send(conversationId, publicMessage);
+```
+
+## Reactions
+
+Reactions allow your agent to add or remove emoji reactions on messages in a conversation, and to receive reactions added by users. See the [Message Reactions guide](#message-reactions) for full coverage.
+
+## Threading
+
+In Teams channels and 1:1 agent chats, the SDK can send messages into reply chains (threads).
+The SDK provides helpers to simplify working with threads.
+
+In this guide, top-level means a message in the main chat or channel conversation, and in-thread means a message in a reply chain (thread).
+
+Where a message lands depends on the method and the scope:
+
+| Method | 1:1 chat | Channel |
+|---|---|---|
+| `context.SendAsync()` | Matches level of user's message | In-thread |
+| `context.ReplyAsync()` | Matches level of user's message | In-thread |
+
+The SDK places a response in a reply chain only when `channelData.replyChain.id` is present on the inbound activity.
+With no `replyChain`, these methods send to the inbound conversation.
+
+The reply method, `context.ReplyAsync()`, also quotes the user's message.
+To reply in-thread to a top-level message in a 1:1 chat, or to send a top-level message from inside a thread, see [Proactive Messaging](#proactive-messaging).
+
+### Reactive Threading (Within a Handler)
+
+When your agent receives a message in a reply chain (thread), the context sends into that same reply chain.
+In a channel, replying to a top-level post also sends into that post's thread.
+In a 1:1 chat, a response to a top-level message is also top-level, and a thread is started explicitly with a proactive reply (see below).
+Use `SendAsync()` to send reactively without quoting, or `ReplyAsync()` to send a reactive, quoted reply.
+In a channel the answer is in the same thread, and in a 1:1 chat it matches the level of the inbound message.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async (context, cancellationToken) =>
+{
+    // Send in the same thread, no quote
+    await context.Send("Acknowledged", cancellationToken);
+
+    // Send in the same thread with a visual quote of the inbound message
+    await context.Reply("Got it!", cancellationToken);
+});
+```
+
+**SDK 2.2:**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    // Send reactively without quoting.
+    // In a channel, sends in the same thread.
+    // In a 1:1 chat, matches the level of the inbound message.
+    await context.SendAsync("Acknowledged", cancellationToken);
+
+    // Send a reactive, quoted reply.
+    // In a channel, sends in the same thread.
+    // In a 1:1 chat, matches the level of the inbound message.
+    await context.ReplyAsync("Got it!", cancellationToken);
+});
+```
+
+#### Where the SDK takes the destination from
+
+The SDK reads `channelData` on the inbound activity to find the destination and does not parse the conversation id.
+To tell a channel from a chat, it also uses `conversation.conversationType`: `channel` selects the channel rules below, and anything else selects the chat rules.
+
+- **Channel:** a response to a `message` is sent through the reply chain `channelData.replyChain.id` of the channel `channelData.channel.id`.
+  If the reply chain route answers HTTP `404`, the SDK sends to the inbound conversation instead.
+  For a channel message, the inbound conversation id already identifies the same thread, so the response stays in it.
+  The SDK checks only the status code.
+- **1:1 chat:** when the inbound activity is inside a thread (see the table below), the response is sent through the reply chain `channelData.replyChain.id` of the chat `channelData.chat.id`.
+  Otherwise it is sent to the inbound conversation, at the top level.
+  An error from the reply chain route is thrown to your handler, and the response is not sent anywhere else.
+- **Missing ids:** when `channelData.replyChain`, or the id of the scope (`channelData.chat.id` in a 1:1 chat, `channelData.channel.id` in a channel), is missing, the SDK does not use the reply chain route and sends to the inbound conversation.
+  In a channel, the inbound conversation id can still keep the response in the thread.
+
+Typing indicators sent with `context.TypingAsync()` are not placed.
+Only message responses are.
+
+#### Responding to edits, reactions and card actions
+
+In a 1:1 chat the SDK also places a response to an inbound activity that is not a typed message.
+It compares `channelData.replyChain.id` with the id of the message the activity acts on, and the activity is inside a thread when they differ.
+
+| Inbound activity | Message it acts on | Inside a thread when |
+|---|---|---|
+| `message` typed by the user | The message, `activity.id` | `replyChain.id` differs from `activity.id` |
+| `messageUpdate`, `messageDelete` | The edited or deleted message, `activity.id` | `replyChain.id` differs from `activity.id` |
+| `messageReaction` | The reacted message, `replyToId` | `replyToId` is a plain number other than `0` that differs from `replyChain.id` |
+| `message` with `channelData.source`, sent by a card button (`messageBack`, `Action.Submit`) | The message with the card, `replyToId` | `replyToId` is a plain number other than `0` that differs from `replyChain.id` |
+| `invoke` with `value.messagePayload` (a message action) | The message the action ran on, `value.messagePayload.id` | That id is a plain number other than `0` that differs from `replyChain.id` |
+| Any other `invoke` with a `replyToId`, such as `adaptiveCard/action` from `Action.Execute`, `task/fetch` and `task/submit` from a card button, or `message/submitAction` feedback | The message with the card or feedback buttons, `replyToId` | `replyToId` is a plain number other than `0` that differs from `replyChain.id` |
+| `invoke` with neither, such as a compose box action or sign-in | None | `replyChain.id` is present |
+| Any other activity, such as `installationUpdate` or `conversationUpdate` | None | Never |
+
+So a response to a card button clicked on a top-level message is top-level, and a response to a card button clicked on a card inside a thread is sent into that thread.
+A `replyToId` that is not a plain number, such as an encrypted id, is never inside a thread.
+
+The SDK uses `conversation.conversationType` only to tell a channel from a chat.
+In a chat it does not require a particular type to place a response.
+In the 1:1 chat of an agentic user, card button clicks (`messageBack`, `Action.Submit`, `Action.Execute`) and the `task/fetch` and `task/submit` invokes they open have arrived with `conversationType` set to `groupChat`, a service issue that is being corrected.
+The SDK places the response to them from `channelData` like any other activity, so a response to a click inside a thread is sent into that thread.
+
+In a channel only a `message` is placed, and a card button click that arrives as a `message` is placed like any other.
+The SDK sends a response to any other activity in a channel to the inbound conversation.
+
+For proactive threading (sending to a thread outside of a handler), see [Proactive Messaging](#proactive-messaging).
+
+#### Experimental status
+
+The reply chain operations on the clients, `ConversationApiClient.CreateReplyChainActivityAsync` and `CreateTargetedReplyChainActivityAsync`, and the core client's `SendReplyChainActivityAsync`, carry `[Experimental("ExperimentalTeamsThreading")]`.
+Calling them directly raises the compiler diagnostic `ExperimentalTeamsThreading` until you suppress it, for example with `#pragma warning disable ExperimentalTeamsThreading`.
+`TeamsChannelData.Chat` and `TeamsChannelData.ReplyChain` (`ChatInfo`, `ReplyChainInfo`) are marked in the XML documentation only.
+`SendAsync`, `ReplyAsync` and `app.ReplyAsync` are not marked.
+
+## Quoted Replies
+
+Quoted replies let your agent reference a previous message in the conversation. When a user sends a message that quotes another message, your agent receives structured metadata about the quoted content. Your agent can also send messages that quote previous messages.
+
+### Receiving Quoted Replies
+
+When a user quotes a message and sends it to your agent, the quoted reply metadata is available on the inbound activity. Use the `GetQuotedMessages()` method to access all quoted reply entities.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async context =>
+{
+    var quotes = context.Activity.GetQuotedMessages();
+
+    if (quotes.Count > 0)
+    {
+        var quote = quotes[0].QuotedReply;
+        await context.Reply(
+            $"You quoted message {quote.MessageId} from {quote.SenderName}: \"{quote.Preview}\"");
+    }
+});
+```
+
+**SDK 2.1+:**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    var quotes = context.Activity.GetQuotedMessages();
+
+    if (quotes.Count > 0)
+    {
+        var quote = quotes[0].QuotedReply;
+        await context.ReplyAsync(
+            $"You quoted message {quote.MessageId} from {quote.SenderName}: \"{quote.Preview}\"",
+            cancellationToken);
+    }
+});
+```
+
+Each quoted reply entity contains the quoted message's ID, sender information, a preview of the quoted text, and whether the quoted message has been deleted.
+
+### Sending a Quoted Reply
+
+When your agent calls `ReplyAsync()`, the SDK automatically stamps a quoted reply entity referencing the inbound message when its id is a plain message id. The reply will appear as a quoted reply in Teams.
+
+This applies when `activity.id` is a plain numeric message id, as it is for messages, edits and deletes.
+Otherwise, for example a card button click or another invoke with an id like `f:<guid>`, the SDK does not quote, and the response is sent like `SendAsync()`, without a quote.
+To quote in a card or invoke handler, quote the message that holds the card with `QuoteAsync()` and its `replyToId`.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async context =>
+{
+    // Reply() automatically quotes the inbound message
+    await context.Reply("Got it!");
+});
+```
+
+**SDK 2.1+:**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    // ReplyAsync() automatically quotes the inbound message
+    await context.ReplyAsync("Got it!", cancellationToken);
+});
+```
+
+To quote a different message in the same conversation (not the inbound message), use the `QuoteAsync()` method with the message ID you want to quote.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async context =>
+{
+    // Quote a specific message by its ID
+    var parentMessageId = "1772050244572";
+    await context.Quote(parentMessageId, "Referencing an earlier message");
+});
+```
+
+**SDK 2.1+:**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    // Quote a specific message by its ID
+    var parentMessageId = "1772050244572";
+    await context.QuoteAsync(parentMessageId, "Referencing an earlier message", cancellationToken);
+});
+```
+
+### Building Quoted Replies for Proactive Send
+
+For proactive scenarios (using `app.Send()`) or when quoting multiple messages, use the `AddQuote()` method on a message activity. Pass the message ID and an optional response text.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+var parentMessageId = "1772050244572";
+var firstMessageId = "1772050244573";
+var secondMessageId = "1772050244574";
+
+// Single quote with response below it
+var msg = new MessageActivityInput()
+    .AddQuote(parentMessageId, "Here is my response");
+await app.Send(conversationId, msg);
+
+// Multiple quotes with interleaved responses
+msg = new MessageActivityInput()
+    .AddQuote(firstMessageId, "response to first")
+    .AddQuote(secondMessageId, "response to second");
+await app.Send(conversationId, msg);
+
+// Grouped quotes — omit response to group quotes together
+msg = new MessageActivityInput()
+    .WithText("see below for previous messages")
+    .AddQuote(firstMessageId)
+    .AddQuote(secondMessageId, "response to both");
+await app.Send(conversationId, msg);
+```
+
+**SDK 2.1+:**
+
+```csharp
+var parentMessageId = "1772050244572";
+var firstMessageId = "1772050244573";
+var secondMessageId = "1772050244574";
+
+// Single quote with response below it
+var msg = new MessageActivity()
+    .AddQuote(parentMessageId, "Here is my response");
+await app.Send(conversationId, msg);
+
+// Multiple quotes with interleaved responses
+msg = new MessageActivity()
+    .AddQuote(firstMessageId, "response to first")
+    .AddQuote(secondMessageId, "response to second");
+await app.Send(conversationId, msg);
+
+// Grouped quotes — omit response to group quotes together
+msg = new MessageActivity("see below for previous messages")
+    .AddQuote(firstMessageId)
+    .AddQuote(secondMessageId, "response to both");
+await app.Send(conversationId, msg);
+```
+
+---
+
+### User Authentication
+
+# User Authentication
+
+At times, agents must access secured online resources on behalf of the user, such as checking email, checking flight status, or placing an order. To enable this, the user must authenticate their identity and grant consent for the application to access these resources. This process results in the application receiving a token, which the application can then use to access the permitted resources on the user's behalf.
+
+## How Auth Works
+
+When building Teams applications, choosing the right authentication method is crucial for both security and user experience. Teams supports two primary authentication approaches: OAuth and Single Sign-On (SSO). While both methods serve the same fundamental purpose of validating user identity, they differ significantly in their implementation, supported identity providers, and user experience. Understanding these differences is essential for making the right choice for your application.
+
+The following table provides a clear comparison between OAuth and SSO authentication methods, highlighting their key differences in terms of identity providers, authentication flows, and user experience.
+
+### Single Sign-On (SSO)
+
+Single Sign-On (SSO) in Teams provides a seamless authentication experience by leveraging a user's existing Teams identity. Once a user is logged into Teams, they can access your app without needing to sign in again. The only requirement is a one-time consent from the user, after which your app can securely retrieve their access details from Microsoft Entra ID. This consent is device-agnostic - once granted, users can access your app from any device without additional authentication steps.
+
+When an access token expires, the app automatically initiates a token exchange flow. In this process:
+
+1. The Teams client sends an OAuth ID token containing the user's information
+2. Your app exchanges this ID token for a new access token with the previously consented scopes
+3. This exchange happens silently without requiring user interaction
+
+:::tip
+Always use SSO if you're authenticating the user with Microsoft Entra ID.
+:::
+
+#### The SSO Signin Flow
+
+The SSO signin flow involves several components working together. Here's how it works:
+
+1. User interacts with your bot or message extension app
+2. App initiates the signin process
+3. If it's the first time:
+   - User is shown a consent form for the requested scopes
+   - Upon consent, Microsoft Entra ID issues an access token (in simple terms)
+4. For subsequent interactions:
+   - If token is valid, app uses it directly
+   - If token expires, app silently signs the user in using the token exchange flow
+
+This is what the SSO consent form looks like in Teams:
+
+![SSO Consent Form](/screenshots/auth-consent-popup.png)
+
+### OAuth
+
+You can use a third-party OAuth Identity Provider (IdP) to authenticate your app users. The app user is registered with the identity provider, which has a trust relationship with your app. When the user attempts to log in, the ident

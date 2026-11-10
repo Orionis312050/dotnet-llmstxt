@@ -1,0 +1,1085 @@
+e = "MSLearn",
+                TransportMode = HttpTransportMode.StreamableHttp
+            }),
+            cancellationToken: cancellationToken);
+
+        IList tools =
+            await client.ListToolsAsync(cancellationToken: cancellationToken);
+
+        return new McpToolSet(client, tools, logger);
+    }
+
+    // Returns each MCP tool wrapped so its results feed into the CitationCollector.
+    public IList GetTools(CitationCollector citations) =>
+        [.. _tools.Select(t => new CitationCapturingTool(t, citations, _logger))];
+
+    public ValueTask DisposeAsync() => _client.DisposeAsync();
+}
+
+internal sealed class McpToolSetLifetimeService(ILogger logger) : IHostedService
+{
+    private McpToolSet? _value;
+
+    public McpToolSet Value => _value ?? throw new InvalidOperationException("MCP tool set is not initialized.");
+
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        _value = await McpToolSet.CreateAsync(logger, cancellationToken);
+    }
+
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        if (_value is null) return;
+
+        await _value.DisposeAsync();
+        _value = null;
+    }
+}
+builder.Services.AddSingleton();
+builder.Services.AddHostedService(sp => sp.GetRequiredService());
+
+public Agent(IChatClient chatClient, McpToolSetLifetimeService mcpTools, ILogger logger)
+{
+    _chatClient = chatClient;
+    _mcpTools = mcpTools;
+    _logger = logger;
+}
+
+```
+
+## Running the agent in Teams
+
+Integrate with Teams by forwarding incoming messages to the agent and streaming the response back to the chat interface chunk by chunk.
+
+```csharp
+public async Task RunAsync(
+    string userText,
+    TeamsStreamingWriter writer,
+    CancellationToken cancellationToken)
+{
+    try
+    {
+        McpToolSet mcpTools = _mcpTools.Value;
+        ChatOptions options = new()
+        {
+            Tools =
+            [
+                LocalTools.CreateClarificationCardTool(pendingCards, _logger),
+                .. mcpTools.GetTools(citations)
+            ]
+        };
+        await writer.SendInformativeUpdateAsync("Thinking…", cancellationToken);
+        await foreach (ChatResponseUpdate update in
+            _chatClient.GetStreamingResponseAsync(new ChatMessage(ChatRole.User, userText), options, cancellationToken))
+        {
+            if (!string.IsNullOrEmpty(update.Text))
+            {
+                await writer.AppendResponseAsync(update.Text, cancellationToken);
+            }
+        }
+
+        await writer.FinalizeResponseAsync();
+    }
+```
+
+## Per-conversation memory
+
+By default, each run starts with no history — the model only sees the current message. This works for one-shot interactions, but is insufficient for multi-turn conversations where users refer back to earlier context. Keep a per-conversation buffer and reuse it across turns:
+
+```csharp
+private readonly ConcurrentDictionary<string, List> _histories = new();
+public async Task RunAsync(
+    string conversationId,
+    string userText,
+    TeamsStreamingWriter writer,
+    CancellationToken cancellationToken)
+{
+    List history = _histories.GetOrAdd(
+        conversationId,
+        _ => [new ChatMessage(ChatRole.System, SystemPrompt)]);
+    McpToolSet mcpTools = _mcpTools.Value;
+
+    ChatOptions options = new()
+    {
+        Tools =
+        [
+            LocalTools.CreateClarificationCardTool(pendingCards, _logger),
+            .. mcpTools.GetTools(citations)
+        ]
+    };
+
+    history.Add(new ChatMessage(ChatRole.User, userText));
+    await writer.SendInformativeUpdateAsync("Thinking…", cancellationToken);
+    StringBuilder fullText = new();
+    await foreach (ChatResponseUpdate update in
+        _chatClient.GetStreamingResponseAsync(history, options, cancellationToken))
+    {
+        if (!string.IsNullOrEmpty(update.Text))
+        {
+            await writer.AppendResponseAsync(update.Text, cancellationToken);
+            fullText.Append(update.Text);
+        }
+    }
+    string fullTextStr = fullText.ToString();
+    if (fullTextStr.Length > 0)
+        history.Add(new ChatMessage(ChatRole.Assistant, fullTextStr));
+
+    await writer.FinalizeResponseAsync();
+}
+```
+
+Each turn acquires a per-conversation lock before mutating history.
+
+In production, push conversation history into Redis, Cosmos DB, or whatever you already use for state.
+
+## Grounding responses with citations
+
+When a tool returns search results, you usually want the model to cite its sources. The pattern: intercept each tool result, assign every source a stable 1-based index, and hand that index back to the model so it can reference it inline as `[1]`, `[2]`, and so on. The collected citations are attached to the final reply in [Enhancing the Teams Experience](#enhance-the-teams-experience).
+
+In Microsoft.Extensions.AI, wrap each MCP tool with a `DelegatingAIFunction`. Override `InvokeCoreAsync`, invoke the wrapped tool, then inspect its result to collect citation metadata without coupling citation logic to the agent.
+
+```csharp
+// Wraps an McpClientTool, delegating all metadata to it while intercepting
+// InvokeCoreAsync to extract citation data from the raw result string.
+file sealed class CitationCapturingTool(McpClientTool inner, CitationCollector citations, ILogger logger)
+    : DelegatingAIFunction(inner)
+{
+    protected override async ValueTask<object?> InvokeCoreAsync(
+        AIFunctionArguments arguments,
+        CancellationToken cancellationToken)
+    {
+        logger.LogInformation("[tool] {Name}({Args})",
+            inner.Name,
+            string.Join(", ", arguments.Select(a => $"{a.Key}={a.Value}")));
+
+        object? result = await inner.InvokeAsync(arguments, cancellationToken);
+        if (result?.ToString() is string text)
+            citations.TryExtract(text);
+        return result;
+    }
+}
+
+internal sealed class CitationCollector
+{
+    private readonly ILogger _logger;
+    private readonly Dictionary<string, CitationEntry> _citations = [];
+
+    public CitationCollector(ILogger logger)
+    {
+        _logger = logger;
+    }
+
+    public void TryExtract(string result)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(result);
+            if (!TryFindResults(doc.RootElement, out JsonElement results)) return;
+
+            foreach (JsonElement item in results.EnumerateArray())
+            {
+                string? url = GetString(item, "contentUrl") ?? GetString(item, "link");
+                if (url is null || _citations.ContainsKey(url)) continue;
+
+                string snippet = GetString(item, "content") ?? GetString(item, "description") ?? "";
+                _citations[url] = new CitationEntry(
+                    Position: _citations.Count + 1,
+                    Url: url,
+                    Title: GetString(item, "title") ?? "",
+                    Snippet: snippet.Length > 160 ? snippet[..160] : snippet);
+            }
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogDebug(ex, "Skipped citation extraction because the tool result was not valid JSON.");
+        }
+        catch (FormatException ex)
+        {
+            _logger.LogDebug(ex, "Skipped citation extraction because the tool result had an unexpected format.");
+        }
+    }
+
+    private static bool TryFindResults(JsonElement element, out JsonElement results)
+    {
+        if (element.TryGetProperty("results", out results) && results.ValueKind == JsonValueKind.Array)
+            return true;
+
+        foreach (JsonProperty prop in element.EnumerateObject())
+        {
+            if (prop.Value.ValueKind == JsonValueKind.Object &&
+                prop.Value.TryGetProperty("results", out results) &&
+                results.ValueKind == JsonValueKind.Array)
+                return true;
+        }
+
+        results = default;
+        return false;
+    }
+}
+```
+
+For Teams-specific enhancements — continue to [Enhancing the Teams Experience](#enhance-the-teams-experience).
+
+---
+
+### Building Adaptive Cards
+
+# Building Adaptive Cards
+
+Adaptive Cards are JSON payloads that describe rich, interactive UI fragments.
+
+With `Microsoft.Teams.Cards` you can build these cards entirely in C# while enjoying full IntelliSense and compiler safety.
+
+## The Builder Pattern
+
+`Microsoft.Teams.Cards` exposes small **builder helpers** including `AdaptiveCard`, `TextBlock`, `ToggleInput`, `ExecuteAction`, _etc._
+
+Each helper wraps raw JSON and provides fluent, chainable methods that keep your code concise and readable.
+
+```csharp
+using Microsoft.Teams.Cards;
+
+var card = new AdaptiveCard
+{
+    Schema = "http://adaptivecards.io/schemas/adaptive-card.json",
+    Body = new List
+    {
+        new TextBlock("Hello world")
+        {
+            Wrap = true,
+            Weight = TextWeight.Bolder
+        },
+        new ToggleInput("Notify me")
+        {
+            Id = "notify"
+        }
+    },
+    Actions = new List
+    {
+        new ExecuteAction
+        {
+            Title = "Submit",
+            Data = new Union<string, SubmitActionData>(new SubmitActionData
+            {
+                NonSchemaProperties = new Dictionary<string, object?>
+                {
+                    { "action", "submit_basic" }
+                }
+            }),
+            AssociatedInputs = AssociatedInputs.Auto
+        }
+    }
+};
+```
+
+Benefits:
+
+| Benefit     | Description                                                                   |
+| ----------- | ----------------------------------------------------------------------------- |
+| Readability | No deep JSON trees—just chain simple methods.                                 |
+| Re‑use      | Extract snippets to functions or classes and share across cards.              |
+| Safety      | Builders validate every property against the Adaptive Card schema (see next). |
+
+:::info
+The builder helpers use strongly-typed interfaces. Use IntelliSense (Ctrl+Space) or "Go to Definition" (F12) in your IDE to explore available types and properties. Source code lives in the `Microsoft.Teams.Cards` namespace.
+:::
+
+## Type‑safe Authoring & IntelliSense
+
+The package bundles the **Adaptive Card v1.5 schema** as strict C# types.
+While coding you get:
+
+- **Autocomplete** for every element and attribute.
+- **In‑editor validation**—invalid enum values or missing required properties produce build errors.
+- Automatic upgrades when the schema evolves; simply update the package.
+
+```csharp
+// "Huge" is not a valid size for TextBlock - this will cause a compilation error
+var textBlock = new TextBlock("Test")
+{
+    Wrap = true,
+    Weight = TextWeight.Bolder,
+    Size = "Huge" // This is invalid - should be TextSize enum
+};
+```
+
+## The Visual Designer
+
+Prefer a drag‑and‑drop approach? Use [Microsoft's Adaptive Card Designer](https://adaptivecards.microsoft.com/designer.html):
+
+1. Add elements visually until the card looks right.
+2. Copy the JSON payload from the editor pane.
+3. Paste the JSON into your project **or** convert it to builder calls:
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+    var cardJson = """
+    {
+        "type": "AdaptiveCard",
+        "body": [
+            {
+                "type": "ColumnSet",
+                "columns": [
+                    {
+                        "type": "Column",
+                        "verticalContentAlignment": "center",
+                        "items": [
+                            {
+                                "type": "Image",
+                                "style": "Person",
+                                "url": "https://aka.ms/AAp9xo4",
+                                "size": "Small",
+                                "altText": "Portrait of David Claux"
+                            }
+                        ],
+                        "width": "auto"
+                    },
+                    {
+                        "type": "Column",
+                        "spacing": "medium",
+                        "verticalContentAlignment": "center",
+                        "items": [
+                            {
+                                "type": "TextBlock",
+                                "weight": "Bolder",
+                                "text": "David Claux",
+                                "wrap": true
+                            }
+                        ],
+                        "width": "auto"
+                    },
+                    {
+                        "type": "Column",
+                        "spacing": "medium",
+                        "verticalContentAlignment": "center",
+                        "items": [
+                            {
+                                "type": "TextBlock",
+                                "text": "Principal Platform Architect at Microsoft",
+                                "isSubtle": true,
+                                "wrap": true
+                            }
+                        ],
+                        "width": "stretch"
+                    }
+                ]
+            }
+        ],
+        "version": "1.5",
+        "schema": "http://adaptivecards.io/schemas/adaptive-card.json"
+    }
+    """;
+
+    // Deserialize the JSON into an AdaptiveCard object
+    var card = AdaptiveCard.Deserialize(cardJson);
+
+    // Send the card
+    await client.Send(card);
+    ```
+
+**SDK 2.1 (current):**
+
+```csharp
+    using System.Text.Json;
+    using Microsoft.Teams.Apps;
+    using Microsoft.Teams.Cards;
+
+    var cardJson = """
+    {
+        "type": "AdaptiveCard",
+        "body": [
+            {
+                "type": "ColumnSet",
+                "columns": [
+                    {
+                        "type": "Column",
+                        "verticalContentAlignment": "center",
+                        "items": [
+                            {
+                                "type": "Image",
+                                "style": "Person",
+                                "url": "https://aka.ms/AAp9xo4",
+                                "size": "Small",
+                                "altText": "Portrait of David Claux"
+                            }
+                        ],
+                        "width": "auto"
+                    },
+                    {
+                        "type": "Column",
+                        "spacing": "medium",
+                        "verticalContentAlignment": "center",
+                        "items": [
+                            {
+                                "type": "TextBlock",
+                                "weight": "Bolder",
+                                "text": "David Claux",
+                                "wrap": true
+                            }
+                        ],
+                        "width": "auto"
+                    },
+                    {
+                        "type": "Column",
+                        "spacing": "medium",
+                        "verticalContentAlignment": "center",
+                        "items": [
+                            {
+                                "type": "TextBlock",
+                                "text": "Principal Platform Architect at Microsoft",
+                                "isSubtle": true,
+                                "wrap": true
+                            }
+                        ],
+                        "width": "stretch"
+                    }
+                ]
+            }
+        ],
+        "version": "1.5",
+        "schema": "http://adaptivecards.io/schemas/adaptive-card.json"
+    }
+    """;
+
+    // Deserialize the JSON into an AdaptiveCard object
+    var card = AdaptiveCard.Deserialize(cardJson);
+
+    // Serialize and wrap in a TeamsAttachment
+    JsonElement cardElement = JsonSerializer.SerializeToElement(card);
+    TeamsAttachment attachment = TeamsAttachment.CreateBuilder()
+        .WithAdaptiveCard(cardElement)
+        .Build();
+
+    // Send the card
+    await context.SendAsync(new MessageActivityInput().AddAttachment(attachment), cancellationToken);
+    ```
+
+This method leverages the full Adaptive Card schema and ensures that the payload adheres strictly to `AdaptiveCard`.
+
+:::tip
+You can use a combination of raw JSON and builder helpers depending on whatever you find easier.
+:::
+
+## End‑to‑end Example – Task Form Card
+
+Below is a complete example showing a task management form.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+    using Microsoft.Teams.Apps.Annotations;
+
+    [TeamsController]
+    public class MessageController
+    {
+        [Message]
+        public async Task OnMessage([Context] IContext context)
+        {
+            var text = context.Activity.Text?.ToLowerInvariant() ?? "";
+
+            if (text.Contains("form"))
+            {
+                var card = CreateTaskFormCard();
+                await context.Client.Send(card);
+            }
+        }
+    }
+    ```
+
+**SDK 2.1 (current):**
+
+```csharp
+    using System.Text.Json;
+    using Microsoft.Teams.Apps;
+    using Microsoft.Teams.Cards;
+
+    bot.OnMessage(async (context, cancellationToken) =>
+    {
+        var text = context.Activity.Text?.ToLowerInvariant() ?? "";
+
+        if (text.Contains("form"))
+        {
+            await context.TypingAsync(cancellationToken);
+            var card = CreateTaskFormCard();
+            JsonElement cardElement = JsonSerializer.SerializeToElement(card);
+            TeamsAttachment attachment = TeamsAttachment.CreateBuilder()
+                .WithAdaptiveCard(cardElement)
+                .Build();
+            await context.SendAsync(new MessageActivityInput().AddAttachment(attachment), cancellationToken);
+        }
+    });
+    ```
+
+The definition for `CreateTaskFormCard` is as follows
+
+```csharp
+private static AdaptiveCard CreateTaskFormCard()
+{
+    return new AdaptiveCard
+    {
+        Schema = "http://adaptivecards.io/schemas/adaptive-card.json",
+        Body = new List
+        {
+            new TextBlock("Create New Task")
+            {
+                Weight = TextWeight.Bolder,
+                Size = TextSize.Large
+            },
+            new TextInput
+            {
+                Id = "title",
+                Label = "Task Title",
+                Placeholder = "Enter task title"
+            },
+            new TextInput
+            {
+                Id = "description",
+                Label = "Description",
+                Placeholder = "Enter task details",
+                IsMultiline = true
+            },
+            new ChoiceSetInput
+            {
+                Id = "priority",
+                Label = "Priority",
+                Value = "medium",
+                Choices = new List
+                {
+                    new() { Title = "High", Value = "high" },
+                    new() { Title = "Medium", Value = "medium" },
+                    new() { Title = "Low", Value = "low" }
+                }
+            },
+            new DateInput
+            {
+                Id = "due_date",
+                Label = "Due Date",
+                Value = DateTime.Now.ToString("yyyy-MM-dd")
+            }
+        },
+        Actions = new List
+        {
+            new ExecuteAction
+            {
+                Title = "Create Task",
+                Data = new Union<string, SubmitActionData>(new SubmitActionData
+                {
+                    NonSchemaProperties = new Dictionary<string, object?>
+                    {
+                        { "action", "create_task" }
+                    }
+                }),
+                AssociatedInputs = AssociatedInputs.Auto,
+                Style = ActionStyle.Positive
+            }
+        }
+    };
+}
+```
+
+## Additional Resources
+
+- [**Official Adaptive Card Documentation**](https://adaptivecards.microsoft.com/)
+- [**Adaptive Cards Designer**](https://adaptivecards.microsoft.com/designer.html)
+
+### Summary
+
+- Use **builder helpers** for readable, maintainable card code.
+- Enjoy **full type safety** and IDE assistance.
+- Prototype quickly in the **visual designer** and refine with builders.
+
+Happy card building! 🎉
+
+---
+
+### Client Secret Authentication Setup
+
+# Client Secret Authentication Setup
+
+Client Secret authentication is the simplest method, using a password-like secret to authenticate your bot. While easy to set up, secrets need to be rotated periodically and kept secure.
+
+## Prerequisites
+
+Before you begin, ensure you have:
+- An Azure subscription
+- Permissions to create App Registrations and Azure Bot Services
+
+## Setup Steps
+
+### Step 1: Create Azure Bot with Single Tenant
+
+When creating your Azure Bot Service, you must select `Single Tenant` for the `Type of App`.
+
+![Single Tenant Bot Creation](/screenshots/single-tenant-bot.png)
+
+### Step 2: Create Client Secret
+
+**Azure Portal:**
+
+1. Navigate to your **App Registration** in the Azure Portal
+2. Go to **Certificates and Secrets**
+3. Click **New client secret**
+4. Add a description and select an expiration period
+5. Click **Add**
+6. **Important**: Copy the secret value immediately - it won't be shown again
+
+![Secret in Certificates and Secrets](#client-secret-authentication-setup)
+
+**Azure CLI:**
+
+```bash
+# Create a new client secret
+az ad app credential reset --id $APP_ID --append
+```
+
+The command will output the secret value. Save it securely.
+
+## Next Steps
+
+After completing the Azure setup, configure your application code with the appropriate environment variables. See the App Authentication Essentials Guide for details.
+
+---
+
+### Creating Dialogs
+
+# Creating Dialogs
+
+:::tip
+If you're not familiar with how to build Adaptive Cards, check out [the cards guide](#adaptive-cards). Understanding their basics is a prerequisite for this guide.
+:::
+
+## Entry Point
+
+To open a dialog, you need to supply a special type of action to the Adaptive Card. The `TaskFetchAction` is specifically designed for this purpose - it automatically sets up the proper Teams data structure to trigger a dialog. Once this button is clicked, the dialog will open and ask the application what to show.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using Microsoft.Teams.Api.Activities;
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Annotations;
+using Microsoft.Teams.Cards;
+using Microsoft.Teams.Common.Logging;
+
+//...
+
+[Message]
+public async Task OnMessage([Context] MessageActivity activity, [Context] IContext.Client client, [Context] ILogger log)
+{
+    // Create the launcher adaptive card
+    var card = CreateDialogLauncherCard();
+    await client.Send(card);
+}
+
+private static AdaptiveCard CreateDialogLauncherCard()
+{
+    var card = new AdaptiveCard
+    {
+        Body = new List
+        {
+            new TextBlock("Select the examples you want to see!")
+            {
+                Size = TextSize.Large,
+                Weight = TextWeight.Bolder
+            }
+        },
+        Actions = new List
+        {
+            new TaskFetchAction(new { opendialogtype = "simple_form" })
+            {
+                Title = "Simple form test"
+            },
+            new TaskFetchAction(new { opendialogtype = "webpage_dialog" })
+            {
+                Title = "Webpage Dialog"
+            },
+            new TaskFetchAction(new { opendialogtype = "multi_step_form" })
+            {
+                Title = "Multi-step Form"
+            }
+        }
+    };
+
+    return card;
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using Microsoft.Teams.Cards;
+
+//...
+
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    // Create the launcher adaptive card
+    var card = CreateDialogLauncherCard();
+    await context.SendAsync(card, cancellationToken);
+});
+
+private static AdaptiveCard CreateDialogLauncherCard()
+{
+    var card = new AdaptiveCard
+    {
+        Body = new List
+        {
+            new TextBlock("Select the examples you want to see!")
+            {
+                Size = TextSize.Large,
+                Weight = TextWeight.Bolder
+            }
+        },
+        Actions = new List
+        {
+            new TaskFetchAction(new { opendialogtype = "simple_form" })
+            {
+                Title = "Simple form test"
+            },
+            new TaskFetchAction(new { opendialogtype = "webpage_dialog" })
+            {
+                Title = "Webpage Dialog"
+            },
+            new TaskFetchAction(new { opendialogtype = "multi_step_form" })
+            {
+                Title = "Multi-step Form"
+            }
+        }
+    };
+
+    return card;
+}
+```
+
+## Handling Dialog Open Events
+
+Once an action is executed to open a dialog, the Teams client will send an event to the agent to request what the content of the dialog should be. When using `TaskFetchAction`, the data is nested inside an `MsTeams` property structure.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Api.TaskModules;
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Activities.Invokes;
+using Microsoft.Teams.Apps.Annotations;
+using Microsoft.Teams.Common.Logging;
+
+//...
+
+[TaskFetch]
+public Microsoft.Teams.Api.TaskModules.Response OnTaskFetch([Context] Tasks.FetchActivity activity, [Context] IContext.Client client, [Context] ILogger log)
+{
+    var data = activity.Value?.Data as JsonElement?;
+    if (data == null)
+    {
+        log.Info("[TASK_FETCH] No data found in the activity value");
+        return new Microsoft.Teams.Api.TaskModules.Response(
+            new Microsoft.Teams.Api.TaskModules.MessageTask("No data found in the activity value"));
+    }
+
+    var dialogType = data.Value.TryGetProperty("opendialogtype", out var dialogTypeElement) && dialogTypeElement.ValueKind == JsonValueKind.String
+        ? dialogTypeElement.GetString()
+        : null;
+
+    log.Info($"[TASK_FETCH] Dialog type: {dialogType}");
+
+    return dialogType switch
+    {
+        "simple_form" => CreateSimpleFormDialog(),
+        "webpage_dialog" => CreateWebpageDialog(_configuration, log),
+        "multi_step_form" => CreateMultiStepFormDialog(),
+        "mixed_example" => CreateMixedExampleDialog(),
+        _ => new Microsoft.Teams.Api.TaskModules.Response(
+            new Microsoft.Teams.Api.TaskModules.MessageTask("Unknown dialog type"))
+    };
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Apps.TaskModules;
+
+//...
+
+teams.OnTaskFetch(async (context, cancellationToken) =>
+{
+    var data = context.Activity.Value?.Data as JsonElement?;
+    if (data == null)
+    {
+        return TaskModuleResponse.CreateBuilder()
+            .WithType(TaskModuleResponseTypes.Message)
+            .WithMessage("No data found in the activity value")
+            .Build();
+    }
+
+    var dialogType = data.Value.TryGetProperty("opendialogtype", out var dialogTypeElement) && dialogTypeElement.ValueKind == JsonValueKind.String
+        ? dialogTypeElement.GetString()
+        : null;
+
+    return dialogType switch
+    {
+        "simple_form" => CreateSimpleFormDialog(),
+        "webpage_dialog" => CreateWebpageDialog(_configuration, context.Log),
+        "multi_step_form" => CreateMultiStepFormDialog(),
+        "mixed_example" => CreateMixedExampleDialog(),
+        _ => TaskModuleResponse.CreateBuilder()
+            .WithType(TaskModuleResponseTypes.Message)
+            .WithMessage("Unknown dialog type")
+            .Build()
+    };
+});
+```
+
+### Rendering A Card
+
+You can render an Adaptive Card in a dialog by returning a card response.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Api;
+using Microsoft.Teams.Api.TaskModules;
+using Microsoft.Teams.Cards;
+
+//...
+
+private static Microsoft.Teams.Api.TaskModules.Response CreateSimpleFormDialog()
+{
+    var choices = new List
+    {
+        new Choice { Title = "Option 1", Value = "opt1" },
+        new Choice { Title = "Option 2", Value = "opt2" },
+        new Choice { Title = "Option 3", Value = "opt3" }
+    };
+
+    var dialogCard = new AdaptiveCard
+    {
+        Body = new List
+        {
+            new TextBlock("This is a simple form")
+            {
+                Size = TextSize.Large,
+                Weight = TextWeight.Bolder
+            },
+            new TextInput
+            {
+                Id = "name",
+                Label = "Name",
+                Placeholder = "Enter your name",
+                IsRequired = true
+            },
+            new ChoiceSetInput
+            {
+                Id = "preference",
+                Label = "Select your preference",
+                Choices = choices,
+                Style = StyleEnum.Compact
+            }
+        },
+        Actions = new List
+        {
+            new SubmitAction
+            {
+                Title = "Submit",
+                Data = new { submissiondialogtype = "simple_form" }
+            }
+        }
+    };
+
+    var taskInfo = new TaskInfo
+    {
+        Title = "Simple Form Dialog",
+        Card = new Attachment
+        {
+            ContentType = new ContentType("application/vnd.microsoft.card.adaptive"),
+            Content = dialogCard
+        }
+    };
+
+    return new Microsoft.Teams.Api.TaskModules.Response(
+        new Microsoft.Teams.Api.TaskModules.ContinueTask(taskInfo));
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Apps.Schema;
+using Microsoft.Teams.Apps.TaskModules;
+using Microsoft.Teams.Cards;
+
+//...
+
+private static TaskModuleResponse CreateSimpleFormDialog()
+{
+    var choices = new List
+    {
+        new Choice { Title = "Option 1", Value = "opt1" },
+        new Choice { Title = "Option 2", Value = "opt2" },
+        new Choice { Title = "Option 3", Value = "opt3" }
+    };
+
+    var dialogCard = new AdaptiveCard
+    {
+        Body = new List
+        {
+            new TextBlock("This is a simple form")
+            {
+                Size = TextSize.Large,
+                Weight = TextWeight.Bolder
+            },
+            new TextInput
+            {
+                Id = "name",
+                Label = "Name",
+                Placeholder = "Enter your name",
+                IsRequired = true
+            },
+            new ChoiceSetInput
+            {
+                Id = "preference",
+                Label = "Select your preference",
+                Choices = choices,
+                Style = StyleEnum.Compact
+            }
+        },
+        Actions = new List
+        {
+            new SubmitAction
+            {
+                Title = "Submit",
+                Data = new { submissiondialogtype = "simple_form" }
+            }
+        }
+    };
+
+    TeamsAttachment taskModuleCardResponse = TeamsAttachment.CreateBuilder()
+        .WithAdaptiveCard(JsonSerializer.SerializeToElement(dialogCard))
+        .Build();
+
+    return TaskModuleResponse.CreateBuilder()
+        .WithType(TaskModuleResponseTypes.Continue)
+        .WithTitle("Simple Form Dialog")
+        .WithHeight("medium")
+        .WithWidth("medium")
+        .WithCard(taskModuleCardResponse)
+        .Build();
+}
+```
+
+:::info
+The action type for submitting a dialog must be `Action.Submit`. This is a requirement of the Teams client. If you use a different action type, the dialog will not be submitted and the agent will not receive the submission event.
+:::
+
+### Rendering A Webpage
+
+You can render a webpage in a dialog as well. There are some security requirements to be aware of:
+
+1. The webpage must be hosted on a domain that is allow-listed as `validDomains` in the Teams app [manifest](#teams-manifest) for the agent
+2. The webpage must also host the [teams-js client library](https://www.npmjs.com/package/@microsoft/teams-js). The reason for this is that for security purposes, the Teams client will not render arbitrary webpages. As such, the webpage must explicitly opt-in to being rendered in the Teams client. Setting up the teams-js client library handles this for you.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using Microsoft.Teams.Api.TaskModules;
+using Microsoft.Teams.Common;
+
+//...
+
+private static Microsoft.Teams.Api.TaskModules.Response CreateWebpageDialog(IConfiguration configuration, ILogger log)
+{
+    var botEndpoint = configuration["BotEndpoint"];
+    if (string.IsNullOrEmpty(botEndpoint))
+    {
+        botEndpoint = "http://localhost:3978"; // Fallback for local development
+    }
+
+    var taskInfo = new TaskInfo
+    {
+        Title = "Webpage Dialog",
+        Width = new Union<int, Size>(1000),
+        Height = new Union<int, Size>(800),
+        // Here we are using a webpage that is hosted in the same
+        // server as the agent. This server needs to be publicly accessible,
+        // needs to set up teams.js client library (https://www.npmjs.com/package/@microsoft/teams-js)
+        // and needs to be registered in the manifest.
+        Url = $"{botEndpoint}/tabs/dialog-form"
+    };
+
+    return new Microsoft.Teams.Api.TaskModules.Response(
+        new Microsoft.Teams.Api.TaskModules.ContinueTask(taskInfo));
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using Microsoft.Teams.Apps.Schema;
+using Microsoft.Teams.Apps.TaskModules;
+
+//...
+
+private static InvokeResponse CreateWebpageDialog(IConfiguration configuration)
+{
+    var botEndpoint = configuration["BotEndpoint"] ?? "http://localhost:3978";
+
+    // The TaskModuleResponse builder supports card-based dialogs only.
+    // For URL-based dialogs, construct the response manually.
+    // This server needs to be publicly accessible, set up the teams.js client library
+    // (https://www.npmjs.com/package/@microsoft/teams-js), and be registered in the manifest.
+    return new InvokeResponse(200, new TaskModuleResponse
+    {
+        Task = new Microsoft.Teams.Apps.TaskModules.Response
+        {
+            Type = TaskModuleResponseTypes.Continue,
+            Value = new
+            {
+                title = "Webpage Dialog",
+                url = $"{botEndpoint}/tabs/dialog-form",
+                height = 800,
+                width = 1000
+            }
+        }
+    });
+}
+```
+
+### Setting up Embedded Web Content
+
+To serve web content for dialogs, you can use the `AddTab` functionality to embed HTML files as resources:
+
+```csharp
+// In Program.cs when building your app
+app.UseTeams();
+app.AddTab("dialog-form", "Web/dialog-form");
+
+// Configure project file to embed web resources
+// In .csproj:
+// true
+// 
+// 
+```
+
+---
+
+### File and Image Handling
+
+# File and Image Handling
+
+This section covers how your app receives files and inline images and reads their bytes, and how it sends images back.
+
+:::info[Preview]
+The high-level file API is being rolled out incrementally. Today it supports **receiving** files attached to messages via the TypeScript, Python, and C# SDKs: in personal (1:1) chats for every agent, and soon in group chats and channels for agentic users. Receiving inline images through the same API is planned for version 2.2.0.
+:::
+
+## Files vs. attachments
+
+In personal scope, `Activity.Attachments` carries every non-text part: files the user attached, inline images, Adaptive Cards, `@mentions`, link previews, and other content the client or the platform adds. A **file** is the specific subset of attachments that describes a document the user attached, one whose `ContentType` is `file.download.info`.
+
+The `context.Files` accessor is the attached-file view over that raw array. It maps each attached file and inline image to a lazy handle you

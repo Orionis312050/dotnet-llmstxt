@@ -1,0 +1,14 @@
+ation) |
+| **When to pick** | You want primitives preserved across a clean SDK switch; you may need cross-channel reach later | You want existing BotBuilder code running unchanged while you rewrite handlers piece by piece (or not at all) |
+
+## Next steps
+
+- **Sticking with Teams SDK?** Continue to [Get started](#quickstart-register-your-app) or the [TypeScript](#quickstart-register-your-app) / [C#](#quickstart-register-your-app) / [Python](#quickstart-register-your-app) guides.
+- **Need cross-channel reach?** Head to the [Microsoft 365 Agents SDK docs](https://learn.microsoft.com/en-us/microsoft-365/agents-sdk/).
+- **Already using Bot Framework or TeamsFx?** See [Bot Framework migration](#bot-framework-migration) above; both SDKs offer migration paths.
+
+:::tip Build for Teams *and* M365 Copilot at once
+Both SDKs reach Microsoft 365 Copilot through the same Teams client surface. Once your bot works in Teams, [enable it in M365 Copilot](#enabling-in-m365-copilot) with a single CLI command, then republish or reload the app. No code change required.
+:::
+
+---

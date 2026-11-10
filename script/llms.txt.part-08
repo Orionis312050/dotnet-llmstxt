@@ -1,0 +1,905 @@
+screenshots/aspire-otel-trace.png)
+
+### Grafana LGTM
+
+[Grafana LGTM](https://github.com/grafana/docker-otel-lgtm) bundles Tempo (traces), Mimir (metrics), Loki (logs), and Grafana in a single container:
+
+```bash
+docker run --rm -d --name lgtm \
+  -p 3000:3000 -p 4317:4317 -p 4318:4318 \
+  grafana/otel-lgtm
+
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_SERVICE_NAME=my-teams-bot
+
+dotnet run
+```
+
+Open `http://localhost:3000` (default credentials: `admin` / `admin`) to explore Tempo for traces, Mimir for metrics, and Loki for logs.
+
+Here is the same turn in Grafana Tempo — the span waterfall with span attributes showing `activity.type`, `activity.id`, `conversation.id`, `channel.id`, and the `Microsoft.Teams.Core` library name:
+
+![Grafana Tempo trace view showing 6 spans for a bot turn with expanded span attributes — activity.id, activity.type, bot.id, channel.id, conversation.id, and service.url](/screenshots/grafana-otel-trace.png)
+
+## AI and LLM Instrumentation
+
+If your bot calls AI models through [`Microsoft.Extensions.AI`](https://learn.microsoft.com/dotnet/ai/ai-extensions), you can add OpenTelemetry instrumentation to capture LLM spans (chat completions, token usage) and tool-call spans (MCP or function invocation) as part of the same trace. These spans appear as children of the bot's `handler` span, giving you end-to-end visibility from the inbound Teams message through AI model calls and back.
+
+### Step 1: Add the OpenTelemetry middleware to the chat client
+
+When building the `IChatClient` pipeline, call `.UseOpenTelemetry()` to emit spans for each chat completion and tool invocation:
+
+```csharp
+using Azure.AI.OpenAI;
+using Microsoft.Extensions.AI;
+
+IChatClient innerClient = new AzureOpenAIClient(new Uri(endpoint), new Azure.AzureKeyCredential(key))
+    .GetChatClient(deployment)
+    .AsIChatClient();
+
+IChatClient chatClient = innerClient
+    .AsBuilder()
+    .UseFunctionInvocation()
+    .UseOpenTelemetry(sourceName: "Experimental.Microsoft.Extensions.AI")
+    .Build();
+```
+
+The `sourceName` parameter determines the `ActivitySource` name used for the emitted spans. If you use [Model Context Protocol (MCP)](https://learn.microsoft.com/dotnet/ai/model-context-protocol) tools, the MCP client also emits its own spans under the `"ModelContextProtocol"` source.
+
+### Step 2: Register the AI source and meter names
+
+Add the AI and MCP source/meter names alongside the Teams SDK ones in your OpenTelemetry configuration:
+
+```csharp
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing =>
+    {
+        // Teams SDK sources
+        tracing.AddSource(new[] { CoreTelemetryNames.ActivitySourceName,
+                                  TeamsBotApplicationTelemetry.ActivitySourceName });
+        // AI / MCP sources
+        tracing.AddSource(new[] { "Experimental.Microsoft.Extensions.AI",
+                                  "ModelContextProtocol" });
+    })
+    .WithMetrics(metrics =>
+    {
+        // Teams SDK meters
+        metrics.AddMeter(new[] { CoreTelemetryNames.MeterName,
+                                 TeamsBotApplicationTelemetry.MeterName });
+        // AI / MCP meters
+        metrics.AddMeter(new[] { "Experimental.Microsoft.Extensions.AI",
+                                 "ModelContextProtocol" });
+    });
+```
+
+With both steps in place, your traces show the full chain — from the inbound Teams message, through turn and handler processing, into AI model chat completions and tool calls, and back out through the Bot Service response:
+
+![Application Insights end-to-end transaction showing an AI bot turn — handler, orchestrate_tools, two gpt-5.4-mini chat completions, an MCP microsoft_docs_search tool call, and the outbound Bot Service response](/screenshots/appinsights-aibot-trace.png)
+
+For a complete working example, see the [AIBotWithOTel sample](https://github.com/microsoft/teams-agent-accelerator-templates/tree/main/dotnet/AIBotWithOTel).
+
+## Resource Configuration
+
+[Resource attributes](https://learn.microsoft.com/azure/azure-monitor/app/opentelemetry-configuration#set-the-cloud-role-name-and-the-cloud-role-instance) identify your service in the backend. At a minimum, set `service.name` so your bot is distinguishable in Application Map and trace views:
+
+```csharp
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(r => r
+        .AddService(
+            serviceName: "my-teams-bot",
+            serviceVersion: "1.0.0",
+            serviceNamespace: "Contoso.Agents"));
+```
+
+For production, also consider setting `deployment.environment` so you can filter between staging and production:
+
+```csharp
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(r => r
+        .AddService(serviceName: "my-teams-bot", serviceVersion: "1.0.0")
+        .AddAttributes(new Dictionary<string, object>
+        {
+            ["deployment.environment"] = builder.Environment.EnvironmentName,
+            ["service.namespace"] = "Contoso.Agents",
+        }));
+```
+
+If multiple bots share the same Application Insights resource, `service.name` and `service.namespace` are what separate them in the [Application Map](https://learn.microsoft.com/azure/azure-monitor/app/app-map).
+
+> **Note:** When using .NET Aspire, the AppHost automatically sets `service.name` from the project name passed to `AddProject("name")`, so you typically don't need to configure it manually.
+
+## Full Example with Aspire
+
+The [OTelBotWithAspire sample](https://github.com/microsoft/teams-agent-accelerator-templates/tree/main/dotnet/OTelBotWithAspire) is a ready-to-run Aspire solution with three projects:
+
+| Project | Purpose |
+| --- | --- |
+| `OTelBot` | The Teams bot — `Program.cs` is 18 lines |
+| `OTelBotWithAspire.ServiceDefaults` | OpenTelemetry, health checks, and service discovery |
+| `OTelBotWithAspire.AppHost` | Aspire orchestrator that launches the bot with the dashboard |
+
+The bot's `Program.cs` stays minimal because all observability is configured in service defaults:
+
+```csharp
+using Microsoft.Teams.Apps;
+
+WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+builder.AddServiceDefaults();
+builder.Services.AddTeamsBotApplication();
+WebApplication app = builder.Build();
+
+TeamsBotApplication bot = app.UseTeamsBotApplication();
+
+bot.OnMessage(async (ctx, ct) =>
+{
+    string? message = ctx.Activity.TextWithoutMentions;
+    await ctx.SendActivityAsync($"Echo: {message}", ct);
+});
+
+app.MapDefaultEndpoints();
+app.Run();
+```
+
+`AddServiceDefaults()` configures OpenTelemetry (traces, metrics, logs), health checks, service discovery, and resilience — all through the standard [.NET Aspire service defaults](https://learn.microsoft.com/dotnet/aspire/fundamentals/service-defaults) pattern. The service defaults register the Teams SDK's `ActivitySource` and `Meter` names, and conditionally enable OTLP and Azure Monitor exporters based on environment variables.
+
+## Full Example (Standalone)
+
+If you are not using .NET Aspire, here is a standalone `Program.cs` that wires up a Teams bot with OpenTelemetry tracing, metrics, and logs — exporting to OTLP and optionally to Azure Monitor:
+
+```csharp
+using Azure.Monitor.OpenTelemetry.AspNetCore;
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Diagnostics;
+using Microsoft.Teams.Core.Diagnostics;
+using OpenTelemetry.Resources;
+
+WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddTeamsBotApplication();
+
+// --- OpenTelemetry ---
+var otel = builder.Services.AddOpenTelemetry()
+    .ConfigureResource(r => r
+        .AddService(serviceName: "my-teams-bot", serviceVersion: "1.0.0")
+        .AddAttributes(new Dictionary<string, object>
+        {
+            ["deployment.environment"] = builder.Environment.EnvironmentName,
+        }));
+
+// Azure Monitor (requires APPLICATIONINSIGHTS_CONNECTION_STRING env var)
+if (!string.IsNullOrEmpty(builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"]))
+{
+    otel.UseAzureMonitor();
+}
+
+// Traces: Teams SDK sources + auto-instrumentation + OTLP export
+otel.WithTracing(tracing =>
+{
+    tracing.AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation();
+    tracing.AddSource(new[] { CoreTelemetryNames.ActivitySourceName,
+                              TeamsBotApplicationTelemetry.ActivitySourceName });
+    tracing.AddOtlpExporter();
+});
+
+// Metrics: Teams SDK meters + auto-instrumentation + OTLP export
+otel.WithMetrics(metrics =>
+{
+    metrics.AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation()
+        .AddRuntimeInstrumentation();
+    metrics.AddMeter(new[] { CoreTelemetryNames.MeterName,
+                             TeamsBotApplicationTelemetry.MeterName });
+    metrics.AddOtlpExporter();
+});
+
+// Logs: correlated to active traces
+builder.Logging.AddOpenTelemetry(logging =>
+{
+    logging.IncludeFormattedMessage = true;
+    logging.IncludeScopes = true;
+});
+
+// --- App ---
+WebApplication app = builder.Build();
+
+TeamsBotApplication bot = app.UseTeamsBotApplication();
+
+bot.OnMessage(async (ctx, ct) =>
+{
+    string? message = ctx.Activity.TextWithoutMentions;
+    await ctx.SendActivityAsync($"Echo: {message}", ct);
+});
+
+app.Run();
+```
+
+Run with a local OTLP collector (Aspire Dashboard or Grafana LGTM) to see traces, metrics, and correlated logs for every turn. Set `APPLICATIONINSIGHTS_CONNECTION_STRING` to additionally export to Azure Monitor.
+
+## Next Steps
+
+- [OTelBotWithAspire sample](https://github.com/microsoft/teams-agent-accelerator-templates/tree/main/dotnet/OTelBotWithAspire) — ready-to-run Aspire solution with the Aspire Dashboard
+- [.NET observability with OpenTelemetry](https://learn.microsoft.com/dotnet/core/diagnostics/observability-with-otel) — conceptual overview of the three pillars
+- [Configure Azure Monitor OpenTelemetry](https://learn.microsoft.com/azure/azure-monitor/app/opentelemetry-configuration) — sampling, resource attributes, and advanced configuration
+- [OpenTelemetry .NET documentation](https://opentelemetry.io/docs/languages/dotnet/) — upstream reference
+
+---
+
+### Receiving Inline Images
+
+# Receiving Inline Images
+
+When a user pastes an image into the Teams compose box, the image does not arrive inside `Activity.Text`. Teams sends it as an attachment on the inbound message activity, and `context.Files` lists it alongside the files the user attached, as a lazy handle you can download from in the same way as an attached file.
+
+:::info[Coming Soon]
+Receiving inline images through `context.Files` is planned for the next SDK release, version 2.2.0.
+:::
+
+## List pasted images
+
+Each listed file has an `AttachmentStyle` that says how it was attached: `AttachmentStyle.InlineImage` for an image pasted into the message, or `AttachmentStyle.File` for a file attachment. Pass the style as a filter to `ListAsync()` or `FirstAsync()` to get only pasted images:
+
+```csharp
+using Microsoft.Teams.Apps.Files;
+
+teamsApp.OnMessage(async (context, cancellationToken) =>
+{
+    IList pastedImages = await context.Files.ListAsync(
+        new FileListOptions { AttachmentStyle = AttachmentStyle.InlineImage },
+        cancellationToken);
+
+    if (pastedImages.Count == 0)
+    {
+        await context.ReplyAsync("Paste an image into your message and I will read it.", cancellationToken);
+        return;
+    }
+
+    await context.ReplyAsync($"You pasted {pastedImages.Count} image(s).", cancellationToken);
+});
+```
+
+Without a filter, both styles are returned in the order they arrived. Like any listing, this makes no network requests.
+
+## Download a pasted image
+
+A pasted image downloads through the same methods as an attached file, described in [Receiving Files](#receiving-files):
+
+```csharp
+IncomingFile? image = await context.Files.FirstAsync(
+    new FileListOptions { AttachmentStyle = AttachmentStyle.InlineImage },
+    cancellationToken);
+
+if (image is not null)
+{
+    DownloadedFile downloaded = await image.DownloadAsync(cancellationToken);
+    string base64 = Convert.ToBase64String(downloaded.Bytes);
+
+    // Pass downloaded.Bytes or base64, with downloaded.ContentType, to your image-processing or model client.
+}
+```
+
+## How pasted images are named and typed
+
+A pasted image has no file name, so the SDK names it `image-<attachmentId>`. Its listed metadata comes from a format hint Teams sends with the message:
+
+- `Name` gets an extension only for PNG, JPEG, GIF, or WebP, and `Extension` is taken from it, so it is absent when the name has none.
+- `ContentType` is the matching MIME type for those four formats, otherwise `application/octet-stream`.
+- `UniqueId` is always unset, because a pasted image is not stored in OneDrive or SharePoint.
+- `ContentUrl` is the image's Bot API location.
+
+On the downloaded file, `ContentType` is detected from the bytes, and the extension of `Filename` follows it, so the downloaded file name can differ from the listed name. If the bytes are not PNG, JPEG, GIF, or WebP, the listed type is used.
+
+:::note
+Teams saves a pasted GIF as a static PNG. It is listed as `.gif` and `image/gif` but downloads as a PNG.
+:::
+
+## Formats that cannot be downloaded
+
+Some image formats, such as BMP and AVIF, cannot be converted by the Teams service, so Teams shows a placeholder, and they cannot be downloaded. Downloading one of these fails with `InlineImageTransformationException`. The same image sent as a file attachment downloads normally, so asking the user to resend it that way is the recovery:
+
+```csharp
+using Microsoft.Teams.Apps.Files;
+
+try
+{
+    DownloadedFile downloaded = await image.DownloadAsync(cancellationToken);
+    // ...
+}
+catch (InlineImageTransformationException)
+{
+    await context.ReplyAsync("That pasted image cannot be downloaded. Try sending it as a file attachment instead.", cancellationToken);
+}
+```
+
+If the Bot API refuses the token presented for the image, the download fails with `InlineImageAccessException` with a `401` or `403` status. Both errors share the common base error described in [Handle errors](#receiving-files).
+
+## How the image is read
+
+A pasted image is read from the Bot API with the same token the app uses to reply in that conversation, not through Microsoft Graph. This works for traditional bots and for agentic users, which read as their own identity. Inline images list and download in personal chats, group chats, and channels. Outside personal chats, only messages that @mention the agent reach it.
+
+The token is sent only to a URL under the activity's `serviceUrl`. An inline image hosted anywhere else is skipped by `ListAsync()` with a warning in the log.
+
+## Access the raw attachments
+
+An inbound message with a pasted image typically contains two related attachments:
+
+```json
+{
+  "attachments": [
+    {
+      "contentType": "image/png",
+      "contentUrl": "https://.../v3/attachments/{id}/views/original"
+    },
+    {
+      "contentType": "text/html",
+      "content": "<p><img src=\"https://.../objects/{id}/views/imgo\" ...></p>"
+    }
+  ]
+}
+```
+
+The listed file's `Raw` holds only the `image/*` attachment. The `text/html` attachment, which preserves where the image appeared among the message's text and other content, stays in `context.Activity.Attachments`.
+
+---
+
+### Receiving and sending messages
+
+# Receiving and sending messages
+
+Configure the blueprint client ID, credential, and tenant ID in your app's SDK credentials. Teams SDK uses them to acquire tokens for the Agentic User.
+
+## Reactive messaging
+
+An inbound Agent 365 activity includes the Agentic User in `activity.recipient`. The handler context automatically uses that identity for replies, sends, and API calls.
+
+```csharp
+teamsApp.OnMessage(async (context, cancellationToken) =>
+{
+    AgenticIdentity? agenticIdentity =
+        context.Activity.Recipient?.GetAgenticIdentity();
+
+    if (agenticIdentity?.AgenticUserId is not string agenticUserId)
+    {
+        throw new InvalidOperationException(
+            "The activity is not addressed to an Agentic User.");
+    }
+
+    await context.ReplyAsync(
+        $"Hi! I'm an Agentic User, and my user ID is {agenticUserId}. Nice to meet you!",
+        cancellationToken);
+});
+```
+
+:::note Who sends the reply?
+The example sends the reply as the Agentic User from the inbound activity, not as the blueprint. The blueprint authenticates the reusable runtime, but it isn't the conversational sender.
+:::
+
+## Bot capabilities
+
+Most Teams capabilities available to standard bots are also available to Agentic Users, including cards, reactions, and API calls. For inbound activities, the handler's API client uses the Agentic User identity automatically.
+
+This example adds a reaction to an incoming message as the Agentic User:
+
+```csharp
+teamsApp.OnMessage(async (context, cancellationToken) =>
+{
+    await context.Api.Conversations.AddReactionAsync(
+        context.Activity.Conversation.Id,
+        context.Activity.Id,
+        ReactionType.Like,
+        cancellationToken: cancellationToken
+    );
+});
+```
+
+For more reaction options, see [Message Reactions](#message-reactions).
+
+## Proactive messaging
+
+A proactive operation has no inbound activity that identifies the sender. Create an `AgenticIdentity` associated with the Agentic User, then pass it as the operation scope. The app helper supplies the required blueprint ID from app configuration; the Agentic App Instance and Agentic User IDs select the user-backed scope used by this example.
+
+```mermaid
+flowchart TD
+  R[Reactive activity] --> RI[SDK reads Agentic User<br/>from recipient]
+  RI --> RS[reply / send / API call]
+  P[Proactive job] --> PI[App supplies Agentic User]
+  PI --> PS[AgenticIdentity-scoped<br/>send / API call]
+```
+
+If your app will send proactive messages later, store the conversation ID, service URL, Agentic App Instance ID, Agentic User ID, and tenant ID in persistent storage when it receives an activity.
+
+```csharp
+var agenticIdentity = new AgenticIdentity
+{
+    AgenticAppId = agenticAppId,
+    AgenticUserId = agenticUserId,
+    AgenticAppBlueprintId = blueprintId,
+    TenantId = tenantId
+};
+
+await teamsApp.SendAsync(
+    conversationId,
+    "Your scheduled update is ready.",
+    serviceUrl,
+    agenticIdentity,
+    cancellationToken);
+
+ApiClient api = teamsApp.Api
+    .ForServiceUrl(serviceUrl)
+    .ForAgenticIdentity(agenticIdentity);
+
+await api.Conversations.AddReactionAsync(
+    conversationId,
+    activityId,
+    ReactionType.Like,
+    cancellationToken: cancellationToken);
+```
+
+---
+
+### Teams Integration
+
+# Teams Integration
+
+This section describes Teams-specific features and components of the SDK, helping you understand how your agent integrates with the Microsoft Teams platform.
+
+## Core Concepts
+
+When working with Teams, several key components come into play:
+
+- **DevTunnel**: Enables local development by creating secure public endpoints
+- **App Provisioning**: Handles registration and configuration in Teams
+- **Environment Setup**: Manages Teams-specific configuration files
+- **App Packaging**: Bundles your agent for Teams deployment
+
+## In This Section
+
+1. [Core Concepts](#teams-core-concepts) - Understanding the Teams deployment process and architecture
+2. [Teams Manifest](#teams-manifest) - Configuring your agent's Teams presence
+3. [Enabling in M365 Copilot](#enabling-in-m365-copilot) - Make your Teams app available in M365 Copilot
+
+For the manual Azure setup path (existing Entra apps, locked-down environments, custom tenant policies), see [Azure Configuration](#azure-configuration).
+
+Each guide provides detailed information about specific aspects of Teams integration, from local development to production deployment.
+
+---
+
+### llms.txt
+
+# llms.txt
+
+The Teams SDK publishes [llms.txt](https://llmstxt.org) files, plain-text versions of the documentation optimized for AI coding assistants. Point your tool at the right file and it gets the context it needs to help you build Teams apps.
+
+## Available files
+
+### Root
+
+High-level SDK overview with links to reference guides.
+
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms.txt
+```
+
+:::tip
+Instead of manually providing URLs, you can install the [`teams-dev` agent skill](#agent-skills) which automatically gives your coding assistant the right context.
+:::
+
+### Per-language
+
+**TypeScript:**
+
+**Small** — navigation index, the assistant fetches individual pages as needed.
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms_typescript.txt
+```
+
+**Full** — complete documentation in a single file, best for tools with large context windows.
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms_typescript_full.txt
+```
+
+**Python:**
+
+**Small** — navigation index, the assistant fetches individual pages as needed.
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms_python.txt
+```
+
+**Full** — complete documentation in a single file, best for tools with large context windows.
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms_python_full.txt
+```
+
+**C#:**
+
+**Small** — navigation index, the assistant fetches individual pages as needed.
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms_csharp.txt
+```
+
+**Full** — complete documentation in a single file, best for tools with large context windows.
+```
+https://microsoft.github.io/teams-sdk/llms_docs/llms_csharp_full.txt
+```
+
+---
+
+### ⚙️ Settings
+
+# ⚙️ Settings
+
+You can add a settings page that allows users to configure settings for your app.
+
+The user can access the settings by right-clicking the app item in the compose box.
+
+<br />
+<img src=SettingsImgUrl height="300px" alt="Settings" />
+
+This guide will show how to enable user access to settings, as well as setting up a page that looks like this:
+
+![Settings Page](/screenshots/settings-page.png)
+
+## 1. Update the Teams Manifest
+
+Set the `canUpdateConfiguration` field to `true` in the desired message extension under `composeExtensions`.
+
+```json
+"composeExtensions": [
+    {
+        "botId": "${{BOT_ID}}",
+        "canUpdateConfiguration": true,
+        ...
+    }
+]
+```
+
+## 2. Serve the settings `html` page
+
+This is the code snippet for the settings `html` page:
+
+```html
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Message Extension Settings</title>
+    <link
+      rel="stylesheet"
+      href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.0/css/bootstrap.min.css"
+    />
+    <script src="https://statics.teams.cdn.office.net/sdk/v1.11.0/js/MicrosoftTeams.min.js"></script>
+    <style>
+      body {
+        margin: 0;
+        padding: 10px;
+      }
+      .form-group {
+        margin-bottom: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h3>Message Extension Settings</h3>
+      <form id="settingsForm">
+        <div class="form-group">
+          <label>Selected Option:</label>
+          <select class="form-control" id="selectedOption" name="selectedOption">
+            <option value="">Please select an option</option>
+            <option value="option1">Option 1</option>
+            <option value="option2">Option 2</option>
+            <option value="option3">Option 3</option>
+          </select>
+        </div>
+        <button type="submit" class="btn btn-primary">Save Settings</button>
+      </form>
+    </div>
+
+    <script>
+      microsoftTeams.initialize();
+
+      // Get the selectedOption from URL parameters
+      const urlParams = new URLSearchParams(window.location.search);
+      const selectedOption = urlParams.get('selectedOption');
+      if (selectedOption) {
+        document.getElementById('selectedOption').value = selectedOption;
+      }
+
+      document.getElementById('settingsForm').addEventListener('submit', function (event) {
+        event.preventDefault();
+        let selectedValue = document.getElementById('selectedOption').value;
+        microsoftTeams.tasks.submitTask(selectedValue);
+      });
+    </script>
+  </body>
+</html>
+```
+
+Save it in the `index.html` file in the same folder as where your app is initialized.
+
+You can serve it by adding the following code to your app:
+
+```csharp
+// In your startup configuration (Program.cs or Startup.cs)
+app.UseStaticFiles();
+app.MapGet("/tabs/settings", async context =>
+{
+    var html = await File.ReadAllTextAsync("wwwroot/settings.html");
+    context.Response.ContentType = "text/html";
+    await context.Response.WriteAsync(html);
+});
+```
+
+:::note
+This will serve the HTML page to the `$BOT_ENDPOINT/tabs/settings` endpoint as a tab. See [Tabs Guide](#tabs) to learn more.
+:::
+
+## 3. Specify the URL to the settings page
+
+To enable the settings page, your app needs to handle the `message.ext.query-settings-url` activity that Teams sends when a user right-clicks the app in the compose box. Your app must respond with the URL to your settings page. Here's how to implement this:
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using Microsoft.Teams.Api.Cards;
+using Microsoft.Teams.Cards;
+
+[MessageExtension.QuerySettingsUrl]
+public Microsoft.Teams.Api.MessageExtensions.Response OnMessageExtensionQuerySettingsUrl(
+    [Context] Microsoft.Teams.Api.Activities.Invokes.MessageExtensions.QuerySettingsUrlActivity activity,
+    [Context] IContext.Client client,
+    [Context] Microsoft.Teams.Common.Logging.ILogger log)
+{
+    log.Info("[MESSAGE_EXT_QUERY_SETTINGS_URL] Settings URL query received");
+
+    // Get user settings (this could come from a database or user store)
+    var selectedOption = ""; // Default or retrieve from user preferences
+
+    var botEndpoint = Environment.GetEnvironmentVariable("BOT_ENDPOINT") ?? "https://your-bot-endpoint.com";
+    var settingsUrl = $"{botEndpoint}/tabs/settings?selectedOption={Uri.EscapeDataString(selectedOption)}";
+
+    var settingsAction = new CardAction
+    {
+        Type = CardActionType.OpenUrl,
+        Title = "Settings",
+        Value = settingsUrl
+    };
+
+    var suggestedActions = new Microsoft.Teams.Api.MessageExtensions.SuggestedActions
+    {
+        Actions = new List { settingsAction }
+    };
+
+    var result = new Microsoft.Teams.Api.MessageExtensions.Result
+    {
+        Type = Microsoft.Teams.Api.MessageExtensions.ResultType.Config,
+        SuggestedActions = suggestedActions
+    };
+
+    return new Microsoft.Teams.Api.MessageExtensions.Response
+    {
+        ComposeExtension = result
+    };
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using Microsoft.Teams.Apps.MessageExtensions;
+using Microsoft.Teams.Apps.Schema;
+
+//...
+
+bot.OnQuerySettingUrl(async (context, cancellationToken) =>
+{
+    // Get user settings (this could come from a database or user store)
+    var selectedOption = ""; // Default or retrieve from user preferences
+
+    var botEndpoint = Environment.GetEnvironmentVariable("BOT_ENDPOINT") ?? "https://your-bot-endpoint.com";
+    var settingsUrl = $"{botEndpoint}/tabs/settings?selectedOption={Uri.EscapeDataString(selectedOption)}";
+
+    return MessageExtensionResponse.CreateBuilder()
+        .WithType(MessageExtensionResponseTypes.Config)
+        .WithSuggestedActions(new SuggestedAction(ActionTypes.OpenUrl, "Settings", settingsUrl))
+        .Build();
+});
+```
+
+## 4. Handle Form Submission
+
+When a user submits the settings form, Teams sends a `message.ext.setting` activity with the selected option in the `activity.value.state` property. Handle it to save the user's selection:
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+[MessageExtension.Setting]
+public Microsoft.Teams.Api.MessageExtensions.Response OnMessageExtensionSetting(
+    [Context] Microsoft.Teams.Api.Activities.Invokes.MessageExtensions.SettingActivity activity,
+    [Context] IContext.Client client,
+    [Context] Microsoft.Teams.Common.Logging.ILogger log)
+{
+    log.Info("[MESSAGE_EXT_SETTING] Settings submission received");
+
+    var state = activity.Value?.State;
+    log.Info($"[MESSAGE_EXT_SETTING] State: {state}");
+
+    if (state == "CancelledByUser")
+    {
+        log.Info("[MESSAGE_EXT_SETTING] User cancelled settings");
+        return CreateEmptyResult();
+    }
+
+    var selectedOption = state;
+    log.Info($"[MESSAGE_EXT_SETTING] Selected option: {selectedOption}");
+
+    // Here you would typically save the user's settings to a database or user store
+    // SaveUserSettings(activity.From.Id, selectedOption);
+
+    // Return empty result to close the settings dialog
+    return CreateEmptyResult();
+}
+
+// Helper method to create empty result
+private static Microsoft.Teams.Api.MessageExtensions.Response CreateEmptyResult()
+{
+    return new Microsoft.Teams.Api.MessageExtensions.Response
+    {
+        ComposeExtension = new Microsoft.Teams.Api.MessageExtensions.Result
+        {
+            Type = Microsoft.Teams.Api.MessageExtensions.ResultType.Result,
+            AttachmentLayout = Microsoft.Teams.Api.Attachment.Layout.List,
+            Attachments = new List()
+        }
+    };
+}
+```
+
+**SDK 2.1 (current):**
+
+SDK 2.1 does not have a dedicated settings-submission handler. Inside your existing `OnInvoke` handler, check for `composeExtension/setting`:
+
+```csharp
+bot.OnQuerySetting(async (context, cancellationToken) =>
+{
+    string? state = context.Activity.Value?.State;
+
+    if (state != "CancelledByUser")
+    {
+        // Save the user's settings here
+        // SaveUserSettings(context.Activity.From.Id, state);
+    }
+
+    return new InvokeResponse(200);
+});
+```
+
+---
+
+### 🎮 Microsoft 365 Agents Playground
+
+# 🎮 Microsoft 365 Agents Playground
+
+The Microsoft 365 Agents Playground is a local testing tool for agents built with the Teams SDK. It lets you chat with your agent, mock activities, and inspect requests and responses without sideloading into Teams.
+
+![Microsoft 365 Agents Playground showing the welcome page with a sidebar listing Personal Chat, Group Chat, and Teams Channels, and a 'Type a message' compose box at the bottom.](/screenshots/agents-playground-blank.png)
+
+## Install
+
+### Option 1: npm (recommended)
+
+```bash
+npm install -g @microsoft/m365agentsplayground
+```
+
+### Option 2: Standalone binary
+
+```bash
+winget install agentsplayground
+```
+
+For other platforms and full install options, see the [Microsoft Learn guide](https://learn.microsoft.com/en-us/microsoft-365/agents-sdk/test-with-toolkit-project).
+
+## Migrating from DevTools
+
+If your agent previously used `DevtoolsPlugin` from `@microsoft/teams.dev`, remove it from your `App` configuration. The Playground is a separate CLI tool and does not need a plugin in your code.
+
+You can also remove `@microsoft/teams.dev` from your `package.json` after deleting `DevtoolsPlugin`. The Playground is installed separately as a CLI tool, not as a project dependency.
+
+The Playground sends requests without a Bot Framework JWT, so your agent needs to accept unauthenticated requests on `/api/messages`.
+
+By default the SDK **rejects** unauthenticated requests, so a freshly scaffolded agent rejects every request the Playground sends and logs:
+
+:::warning
+No credentials configured and dangerouslyAllowUnauthenticatedRequests is not enabled. All incoming requests will be rejected. Configure client authentication to securely receive messages, or set dangerouslyAllowUnauthenticatedRequests: true for local development.
+:::
+
+To accept the Playground's requests during local development, enable unauthenticated requests on your app:
+
+**TypeScript:**
+
+```typescript title="src/index.ts"
+const app = new App({ dangerouslyAllowUnauthenticatedRequests: true });
+```
+
+**C#:**
+
+```json title="Properties/launchSettings.json"
+{
+  "profiles": {
+    "YourBot": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "AzureAd__DangerouslyAllowUnauthenticatedRequests": "true"
+      }
+    }
+  }
+}
+```
+
+**Python:**
+
+```python title="src/main.py"
+app = App(dangerously_allow_unauthenticated_requests=True)
+```
+
+:::warning
+Only enable unauthenticated requests for local development — never in production, as it disables inbound request authentication.
+:::
+
+### Why this is needed
+
+`DevtoolsPlugin` previously bypassed JWT validation implicitly because it ran in-process and never went through `/api/messages` over HTTP. The Playground sends real HTTP requests, so the bot's JWT validator runs unless unauthenticated requests are explicitly enabled.
+
+## Launch
+
+Start your agent locally (default port `3978`), then run:
+
+```bash
+agentsplayground -e http://localhost:3978/api/messages -c msteams
+```
+
+The playground opens at [http://localhost:56150](http://localhost:56150).
+
+### Common flags
+
+- `-e, --app-endpoint` — your agent's endpoint, e.g. `http://localhost:3978/api/messages`
+- `-c, --channel-id` — `emulator`, `webchat`, `msteams`, `directline`, or `agents`
+- `--client-id`, `--client-secret`, `--tenant-id` — credentials when your agent requires authentication
+- `-p, --port` — port for the playground UI (default `56150`)
+
+Run `agentsplayground --help` for the full list.
+
+## Test your agent
+
+Type a message in the compose box and send it. Your agent's reply renders inline.
+
+![Microsoft 365 Agents Playground showing a user message 'hello!' and an agent reply 'you said \"hello!\"'.](/screenshots/agents-playground-echo-chat.png)
+
+Use the **Mock an Activity** menu to send custom activity types (membership changes, invokes, message reactions, and more). Use the **Debug Options** menu to control delivery mode and logging. The **Log Panel** (toggle from the top right) shows the HTTP exchange between the playground and your agent.
+
+## Learn more
+
+- [Test your agent locally in Microsoft 365 Agents Playground](https://learn.microsoft.com/en-us/microsoft-365/agents-sdk/test-with-toolkit-project) — full Microsoft Learn guide
+- [Microsoft 365 Agents SDK](https://learn.microsoft.com/en-us/microsoft-365/agents-sdk/)
+
+---
+
+### 📖 Message Extensions
+
+# 📖 Message Extensions
+
+Message extensions (or Compose Extensions) allow your application to hook into messages that users can send or perform actions on messages that users have already sent. They enhance user productivity by providing quick access to information and actions directly within the Teams interface. Users can search or initiate actions from the compose message area, the command box, or directly from a message, with the results returned as richly formatted cards that make information more accessible and actionable.
+
+There are two types of message extensions: [API-based](https://learn.microsoft.com/en-us/microsoftteams/platform/messaging-extensions/api-based-overview) and [Bot-based](https://learn.microsoft.com/en-us/microsoftteams/platform/messaging-extensions/build-bot-based-message-extension?tabs=search-commands). API-based message extensions use an OpenAPI specification that Teams directly queries, requiring no additional application to build or maintain, but offering less customization. Bot-based message extensions require building an application to handle queries, providing more flexibility and customization options. This SDK supports bot-based message extensions only.
+
+## Resources
+
+- [What are message extensions?](https://learn.microsoft.com/en-us/microsoftteams/platform/messaging-extensions/what-are-messaging-extensions?tabs=desktop)
+
+---
+
+### Agentic User lifecycle events
+
+# Agentic User lifecycle events
+
+Agent 365 sends lifecycle events when an Agentic

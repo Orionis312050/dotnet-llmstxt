@@ -1,0 +1,836 @@
+ can download from, and skips everything else. The original `Activity.Attachments` array is always available when you need the raw payload or a non-file attachment.
+
+An **inline image** is an image attachment with an authenticated download URL, commonly paired with an HTML attachment that describes where the image appeared in the composed message. Inline images are listed by the high-level file API alongside attached files, marked with an inline image attachment style.
+
+Sending works similarly: an image you send is an attachment whose content type is an image MIME type, which is why it renders inline rather than arriving as a document.
+
+## In this section
+
+- **[Receiving Files](#receiving-files)** — read files a user attaches to a message, stream or download their bytes, and handle unsupported scopes, expired links, and agentic users.
+- **[Receiving Inline Images](#receiving-inline-images)** — list images pasted into a message, download their bytes, and handle image formats that cannot be downloaded.
+- **[Sending Inline Images](#sending-inline-images)** — send an image that renders directly in the conversation, from a hosted URL or as base64-encoded bytes, within the platform's size and format limits.
+
+## Resources
+
+- [Files in Teams bots](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/bots-filesv4)
+- [Picture messages](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/conversations/conversation-messages#use-picture-messages)
+
+---
+
+### HTML Widgets
+
+# HTML Widgets
+
+HTML Widgets let your app render rich, interactive HTML inside a Teams message.
+A widget is an [MCP Apps (ext-apps)](https://github.com/modelcontextprotocol/ext-apps) surface that the Teams client renders in a sandboxed iframe.
+The widget can call tools on your app, send messages back, request display mode changes, open links, and contribute content to the model context for future turns.
+
+The SDK helps you send a widget and handle its tool calls, but it does not run any code inside the widget.
+Your widget's own JavaScript must complete the MCP Apps handshake and report its size, or it will not display correctly.
+
+:::info What your widget must do
+- **Send `ui/initialize`, then `ui/notifications/initialized`.** Do not send other requests until the `ui/initialize` response arrives.
+- **Report its size with `ui/notifications/size-changed`.** Without a report the host leaves the widget at about 150px tall.
+
+See [Your widget owns the handshake and sizing](#your-widget-owns-the-handshake-and-sizing).
+:::
+
+:::warning Preview
+HTML Widgets are in preview and the API surface may change. HTML Widgets are planned for public preview on 11/16.
+Every widget type and helper is guarded by the `ExperimentalTeamsHtmlWidget` compiler diagnostic, so you opt in explicitly to use them.
+:::
+
+:::warning Message export
+There is a gap in the export APIs that prevents widget content from being exported. If your organization determines this is a problem, you can disable bots that may send widgets.
+:::
+
+## How it works
+
+A widget travels inside a normal message.
+The app sends a message with `textFormat: 'extendedmarkdown'` whose text contains a fenced `html-widget` code block holding a JSON payload:
+
+````text
+Here is your widget:
+
+```html-widget
+
+```
+````
+
+The Teams client parses that block and loads the widget HTML in a sandboxed iframe.
+The widget speaks the MCP Apps protocol to the client over `postMessage`, and from that point the widget and your app communicate through a small set of methods.
+
+## The widget payload
+
+Every widget is described by a payload with the following fields:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `type` | yes | The widget type identifier. Currently only `widget/mcp-ui` is supported. The SDK builders default this for you. |
+| `name` | yes | The display name of the widget. |
+| `html` | yes | The HTML content that makes up the widget. |
+| `domain` | yes | A valid domain URL applied to sandbox metadata. It does not need to resolve or serve content, but must be non-empty. This is informational metadata, not a verified identity claim. |
+| `description` | no | A description of the widget. |
+| `securityPolicy` | no | Allowed origins for network requests, resources, frames, and base URIs. See [Security policy](#security-policy). |
+| `toolInput` | no | Data passed to the widget as initial context. The host delivers it after the handshake in a `ui/notifications/tool-input` notification, as `params.arguments`. |
+| `toolOutput` | no | Data the tool produced alongside the widget. The host delivers it after the handshake in a `ui/notifications/tool-result` notification, with the `content`, `structuredContent`, and `isError` fields as `params`. |
+| `permissions` | no | Capabilities the widget requests from the host (camera, microphone, geolocation, clipboard write). |
+| `mcpUrl` | no | The URL of the MCP server that produced the widget. The Teams client combines it with the owner id to derive the widget's hosting origin, so it is not itself the origin. A widget produced by an MCP server must set it to that server's URL to get its own hosting scope. |
+| `correlationId` | no | A correlation vector for the widget. The Teams client returns it to your app on tool calls from the widget. |
+
+## Your widget owns the handshake and sizing
+
+The SDK sends your HTML exactly as you author it. It does not add any script to it.
+Your widget must do two things itself:
+
+- **Complete the handshake.** Send a `ui/initialize` request to the host with `protocolVersion` (`2026-01-26`), `appInfo` (`name` and `version`), and `appCapabilities`. Wait for the response before sending any other request, because a request sent earlier gets an empty result. When the response arrives, send `ui/notifications/initialized`. The `ui/initialize` result carries `protocolVersion`, `hostCapabilities`, `hostInfo`, and `hostContext` (such as the theme, locale, and display modes). If the response is an error, the handshake failed and the widget must not continue.
+- **Report its size.** Report its height with `ui/notifications/size-changed` after the handshake and whenever its content changes. Without a size report the host leaves the widget at about 150px tall. Observe the widget's root element with a single `ResizeObserver` and report `getBoundingClientRect().height` as is. Rounding the value can leave a gap or clip the content by a pixel.
+
+Messages travel as JSON-RPC 2.0 objects over `window.parent.postMessage`. A request carries an `id` and gets a response with the same `id`. A notification has no `id`.
+
+```js
+const root = document.getElementById('root');
+const post = (message) => window.parent.postMessage({ jsonrpc: '2.0', ...message }, '*');
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window.parent) return;
+  const data = event.data;
+  if (data?.id === 'init') {
+    if (data.error) return console.error('Widget handshake failed', data.error);
+    post({ method: 'ui/notifications/initialized', params: {} });
+    new ResizeObserver(() =>
+      post({ method: 'ui/notifications/size-changed', params: { height: root.getBoundingClientRect().height } })
+    ).observe(root);
+  }
+  if (data?.method === 'ui/notifications/tool-input') console.log(data.params.arguments);
+  if (data?.method === 'ui/notifications/tool-result') console.log(data.params.structuredContent);
+});
+
+post({
+  id: 'init',
+  method: 'ui/initialize',
+  params: { protocolVersion: '2026-01-26', appInfo: { name: 'my-widget', version: '1.0.0' }, appCapabilities: {} },
+});
+```
+
+A widget can ask the host to change its display mode by sending a `ui/request-display-mode` request with ` "mode": "fullscreen" `.
+
+## What the SDK provides
+
+The SDK does not change the wire contract.
+Everything a widget needs could be assembled by hand.
+Instead the SDK ships a small set of helpers so you never have to build the fenced code block, escape the JSON, or hand-parse invoke payloads.
+The SDK does not run inside the widget, so it does not perform the `ui/initialize` handshake, report the widget's size, or deliver `toolInput` and `toolOutput`. The widget does the first two, and the host sends the last two as `ui/notifications/tool-input` and `ui/notifications/tool-result` after the handshake.
+
+- **Build helpers**: `HtmlWidgetHelpers.BuildHtmlWidgetMessage` and `HtmlWidgetHelpers.BuildHtmlWidgetMarkdown` turn a payload into a ready-to-send message (or the raw markdown string) with the correct `html-widget` fence and `extendedmarkdown` text format. See [Sending widgets](#sending-widgets).
+- **A typed tool-call handler**: the `OnWidgetCallTool` handler receives `htmlwidget/calltool` invokes when a widget calls one of your tools, gives you the typed tool name and arguments, and lets you return a typed result. See [Handling tool calls](#handling-tool-calls).
+- **Security helpers**: `HtmlWidgetHelpers.ValidateSecurityPolicy` audits that external references in your HTML are covered by your declared security policy. See [Security policy](#security-policy).
+- **A model-context helper**: `HtmlWidgetHelpers.TryGetWidgetModelContext` parses a widget's `ui/update-model-context` request off an incoming message activity. See [Updating model context](#updating-model-context).
+
+For how failures surface at each stage, from sending to rendering, see [Error handling](#error-handling).
+
+## Resources
+
+- [MCP Apps (ext-apps) specification](https://github.com/modelcontextprotocol/ext-apps)
+- [Model Context Protocol](https://modelcontextprotocol.io)
+
+---
+
+### Listening To Activities
+
+# Listening To Activities
+
+An **Activity** is the Teams‑specific payload that flows between the user and your bot.
+Where _events_ describe high‑level happenings inside your app, _activities_ are the raw Teams messages such as chat text, card actions, installs, or invoke calls.
+
+The Teams SDK exposes a fluent router so you can subscribe to these activities with dedicated handler methods using minimal APIs.
+
+```mermaid
+flowchart LR
+    Teams["Teams"]:::less-interesting
+    Server["App Server"]:::interesting
+    ActivityRouter["Activity Router (app.on())"]:::interesting
+    Handlers["Your Activity Handlers"]:::interesting
+
+    Teams --> |Events| Server
+    Server --> |Activity Event| ActivityRouter
+    ActivityRouter --> |handler invoked| Handlers
+
+    classDef interesting fill:#b1650f,stroke:#333,stroke-width:4px;
+    classDef less-interesting fill:#666,stroke:#333,stroke-width:4px;
+```
+
+Here is an example of a basic message handler:
+
+**SDK 2.0 (Legacy):**
+
+Slash commands arrive as targeted messages. Check `Recipient.IsTargeted` and handle them explicitly:
+
+```csharp
+app.OnMessage(async (context, cancellationToken) =>
+{
+    await context.Send($"you said: {context.Activity.Text}", cancellationToken);
+});
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    await context.SendAsync($"you said: {context.Activity.Text}", cancellationToken);
+});
+```
+
+In the above example, the `context.Activity` property is of type `MessageActivity`, which has a `Text` property. You'll notice that the handler here does not return anything, but instead handles the activity by `Send`ing a message back. For message activities, Teams does not expect your application to return anything (though it's usually a good idea to send some sort of friendly acknowledgment!).
+
+## Slash Commands
+
+Slash commands are manifest-declared commands users run from the compose box. To enable slash commands, set `supportsTargetedMessages: true` in your app manifest (v1.29 or later) under the `bots` section. You can opt in with an explicit command list by declaring specific commands using `commandLists` with `triggers: ["slash"]`, which Teams shows in the slash menu when a user types `/`. Without a command list, users can still invoke your agent via `/agent-name` and provide free-form input.
+
+```json
+{
+  "bots": [
+    {
+      "botId": "{{BOT_ID}}",
+      "scopes": ["personal", "team", "groupChat"],
+      "supportsTargetedMessages": true,
+      "commandLists": [
+        {
+          "scopes": ["team", "groupChat"],
+          "triggers": ["slash"],
+          "commands": [
+            { "title": "Review", "description": "Review a document" }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+When a user sends a slash command, it appears as a private message visible only to them. Your agent can reply privately or, when appropriate, share a response with the broader group or channel.
+
+Slash commands arrive as normal message activities with the targeted flag set on the activity's recipient object.
+
+**SDK 2.0 (Legacy):**
+
+Slash commands arrive as targeted messages. Check `Recipient.IsTargeted` and handle them explicitly:
+
+```csharp
+app.OnMessage(async (context, cancellationToken) =>
+{
+    if (context.Activity.Recipient?.IsTargeted == true)
+    {
+        await context.Send($"Received slash command: {context.Activity.Text}", cancellationToken);
+    }
+});
+```
+
+**SDK 2.1 (current):**
+
+Slash commands arrive as targeted messages. Check `Recipient.IsTargeted` and handle them explicitly:
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    if (context.Activity.Recipient?.IsTargeted == true)
+    {
+        await context.SendAsync($"Received slash command: {context.Activity.Text}", cancellationToken);
+    }
+});
+```
+
+## Activity handler chaining
+
+In SDK 2.1, activity handlers no longer form a next()-style processing chain. Instead, every handler that matches an activity is invoked in the order it was registered, and one handler cannot prevent subsequent matching handlers from running. If you need to intercept, short-circuit, or wrap request processing (for example, to stop execution when a condition is met), implement `ITurnMiddleware` and control whether to call `nextTurn(...)`. See [turn middleware](#middleware) for details.
+
+:::note[SDK 2.0 (Legacy)]
+In SDK 2.0, activity handlers are chained. Call `context.Next()` to continue to the next matching handler; return without it to stop the chain. Registration order determines handler execution order.
+
+```csharp
+app.OnMessage(async (context, cancellationToken) =>
+{
+    if (context.Activity.Text == "/help")
+    {
+        await context.Send("Here are all the ways I can help you...", cancellationToken);
+        return; // stop chain
+    }
+
+    await context.Next(); // continue chain
+});
+
+app.OnMessage(async (context, cancellationToken) =>
+{
+    await context.Send($"Hello! you said {context.Activity.Text}", cancellationToken);
+});
+```
+:::
+
+---
+
+### Proactive Messaging
+
+# Proactive Messaging
+
+In [Sending Messages](./), you were shown how to respond to an event when it happens. However, there are times when you want to send a message to the user without them sending a message first. This is called proactive messaging. You can do this by using the `SendAsync` method on your app instance. This approach is useful for sending notifications or reminders to the user.
+
+The main thing to note is that you need to have the `conversationId` of the chat or channel that you want to send the message to. It's a good idea to store this value somewhere from an activity handler so that you can use it for proactive messaging later.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+    app.OnInstall(async (context, cancellationToken) =>
+    {
+        // Save the conversation id in
+        context.Storage.Set(context.Activity.From.AadObjectId!, context.Activity.Conversation.Id);
+        await context.Send("Hi! I am going to remind you to say something to me soon!", cancellationToken);
+        notificationQueue.AddReminder(context.Activity.From.AadObjectId!, Notifications.SendProactive, 10_000);
+    });
+    ```
+
+**SDK 2.1+:**
+
+```csharp
+    teams.OnInstall(async (context, cancellationToken) =>
+    {
+        // Save the conversation id in
+        context.State.UserState?.Set("conversationId", context.Activity.Conversation.Id);
+        await context.SendAsync("Hi! I am going to remind you to say something to me soon!", cancellationToken);
+    });
+    ```
+
+Then, when you want to send a proactive message, you can retrieve the `conversationId` from storage and use it to send the message.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+public static class Notifications
+{
+    public static async Task SendProactive(string userId)
+    {
+        var conversationId = (string?)storage.Get(userId);
+
+        if (conversationId is null) return;
+
+        await app.Send(conversationId, "Hey! It's been a while. How are you?");
+    }
+}
+```
+
+**SDK 2.1+:**
+
+```csharp
+public static class Notifications
+{
+    public static async Task SendProactive(Context context, CancellationToken cancellationToken = default)
+    {
+        var conversationId = context.State.UserState?.Get<string>("conversationId");
+        if (string.IsNullOrWhiteSpace(conversationId)) return;
+
+        await app.SendAsync(conversationId, "Hey! It's been a while. How are you?", cancellationToken: cancellationToken);
+    }
+}
+```
+
+:::tip
+In this example, you see how to get the `conversationId` using one of the activity handlers. This is a good place to store the conversation id, but you can also do this in other places like when the user installs the app or when they sign in. The important thing is that you have the conversation id stored somewhere so you can use it later.
+:::
+
+## Targeted Proactive Messages
+
+Targeted messages, also known as ephemeral messages, are delivered to a specific user in a shared conversation. From a single user's perspective, they appear as regular inline messages in a conversation. Other participants won't see these messages.
+
+When sending targeted messages proactively, you must explicitly specify the recipient account.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+// When sending proactively, you must provide an explicit recipient account
+public static async Task SendTargetedNotification(string conversationId, Account recipient)
+{
+    var teams = app.UseTeams();
+    await teams.Send(
+        conversationId,
+        new MessageActivity("This is a private notification just for you!")
+            .WithRecipient(recipient, isTargeted: true)
+    );
+}
+```
+
+**SDK 2.1+:**
+
+```csharp
+// When sending proactively, you must provide an explicit recipient account
+public static async Task SendTargetedNotification(
+    string conversationId,
+    Account recipient,
+    CancellationToken cancellationToken = default)
+{
+    await app.SendAsync(
+        conversationId,
+        new MessageActivityInput()
+            .WithText("This is a private notification just for you!")
+            .WithRecipient(recipient, isTargeted: true),
+        cancellationToken: cancellationToken);
+}
+```
+
+## Proactive Threading
+
+The SDK sends messages into reply chains (threads) in channels and 1:1 chats.
+Whether a thread is shown depends on the service and the Teams client.
+The SDK sends a response from a handler through the reply chain route only when `channelData.replyChain.id` is present on the inbound activity.
+With no `replyChain`, the SDK skips that route and sends to the inbound conversation.
+In a channel, the suffix of that conversation id can still keep the response in the thread.
+
+In this guide, top-level means a message in the main chat or channel conversation, and in-thread means a message in a reply chain (thread).
+
+The `app` methods take explicit ids, so they work outside a handler.
+Given the id of the chat or channel (`channelData.chat.id` or `channelData.channel.id`), in 1:1 chats and channels they place the message as follows:
+
+| Method | 1:1 chat | Channel |
+|---|---|---|
+| `app.SendAsync()` | Top-level | Top-level |
+| `app.ReplyAsync()` | In-thread | In-thread |
+
+To proactively send a message as a reply in a thread, use `app.Reply()` (SDK 2.0) / `app.ReplyAsync()` (SDK 2.1+, reply chain routing in SDK 2.2) with the id of the chat or channel and the id of the top-level message of the thread.
+Take the ids from `channelData` on the inbound activity:
+
+- **Chat id:** `channelData.chat.id`, in a 1:1 chat.
+- **Channel id:** `channelData.channel.id`, in a channel.
+- **Reply chain id:** `channelData.replyChain.id`, the id of the top-level message of the thread.
+  - A `replyChain.id` that matches the message's own `activity.Id` indicates a top-level post.
+    A different `replyChain.id` indicates the message is in-thread.
+  - If `replyChain` is absent, there is no reply chain id to take from the inbound activity, so pass an id you stored yourself.
+    The SDK does not take it from the conversation id.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+// SDK 2.0 builds the thread address from a channel id and the numeric id of the root message
+await app.Reply(channelId, messageId, "Thread update!");
+```
+
+**SDK 2.2:**
+
+```csharp
+// chatOrChannelId is channelData.chat.id or channelData.channel.id
+// replyChainId is channelData.replyChain.id
+await app.ReplyAsync(chatOrChannelId, replyChainId, "Thread update!", cancellationToken: cancellationToken);
+```
+
+To send a new top-level (non-threaded) message instead, send to the id of the chat or channel with `app.Send()` (SDK 2.0) / `app.SendAsync()` (SDK >= 2.1).
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+// Send a new top-level message to a channel
+await app.Send(channelId, "Hello!");
+```
+
+**SDK 2.2:**
+
+```csharp
+// Send a new top-level message to the chat or channel
+await app.SendAsync(chatOrChannelId, "Hello!", cancellationToken: cancellationToken);
+```
+
+If the reply chain call fails, `app.ReplyAsync()` throws the error to your code.
+It does not fall back to another route.
+
+Inside a handler, a response goes to the `ServiceUrl` of the inbound activity.
+`app.SendAsync()` and `app.ReplyAsync()` go to the `serviceUrl` argument when you pass one, and otherwise to the service URL of the last inbound activity the app received.
+There is no default, so the call throws `InvalidOperationException` until the app has received an activity.
+
+A service URL without its cloud segment can be accepted and still post the message flat, outside the thread.
+Store the full service URL of the inbound activity, and pass or configure it for proactive calls, instead of rebuilding or trimming it.
+
+The API client's reply operation, `Api.Conversations.ReplyToActivityAsync()`, is a plain send to the conversation it is given.
+It posts to the activities route of that conversation and does not place the message in a reply chain.
+To call the reply chain route directly, use `Api.Conversations.CreateReplyChainActivityAsync()`, which is experimental.
+It takes the chat or channel id and the reply chain id, and has no fallback.
+
+If you stored a conversation id from a channel message, it ends in `;messageid=<root post id>`.
+That form identifies the thread, not the chat or channel, and the reply chain endpoint rejects it.
+Store `channelData.chat.id` or `channelData.channel.id` and `channelData.replyChain.id` instead.
+
+A proactive call has no inbound activity to take an identity from.
+When the recipient is an agentic user, pass its identity from the inbound activity's recipient.
+Without it, the call uses the app's own credentials instead of the agentic user's.
+An agentic app cannot get an app-only token, so the call fails with an authentication error (`AADSTS82001`) and nothing is sent.
+
+```csharp
+// SDK 2.2 and later. AgenticIdentity is null unless the recipient is an agentic user
+await app.ReplyAsync(
+    chatOrChannelId,
+    replyChainId,
+    "Thread update!",
+    agenticIdentity: context.Activity.Recipient?.GetAgenticIdentity(),
+    cancellationToken: cancellationToken);
+```
+
+For reactive threading (within a handler), see [Threading](./#threading).
+
+---
+
+### Quickstart
+
+# Quickstart
+
+Get started with Teams SDK quickly using the Teams Developer CLI.
+
+## Set up a new project
+
+### Prerequisites
+
+- **.NET** v8 or higher. Install or upgrade from [dotnet.microsoft.com](https://dotnet.microsoft.com/en-us/download).
+
+## Instructions
+
+### Install the Teams Developer CLI
+
+Install `teams` globally:
+
+```sh
+npm install -g @microsoft/teams.cli
+teams --version
+```
+
+:::info
+The [Teams Developer CLI](#teams-developer-cli) is the command-line tool for scaffolding, registering, and managing Teams apps.
+:::
+
+## Creating Your First Agent
+
+Let's begin by creating a simple echo agent that responds to messages. Run:
+
+```sh
+teams project new csharp quote-agent --template echo
+```
+
+This command:
+
+1. Creates a new directory called `QuoteAgent`.
+2. Bootstraps the echo agent template files into your project directory.
+
+> The `echo` template creates a basic agent that repeats back any message it receives - perfect for learning the fundamentals.
+
+## Running your agent
+
+1. Navigate to your new agent's directory:
+
+```sh
+cd QuoteAgent/QuoteAgent
+```
+
+2. Install the dependencies:
+
+```sh
+dotnet restore
+```
+
+3. Start the development server:
+
+```sh
+dotnet run
+```
+
+1. In the console, you should see a similar output:
+
+```sh
+info: Microsoft.Hosting.Lifetime[14]
+      Now listening on: http://localhost:3978
+info: Microsoft.Hosting.Lifetime[0]
+      Application started. Press Ctrl+C to shut down.
+```
+
+The HTTP server is now listening on port `3978`. To test your agent locally without sideloading it into Teams, use the **[Microsoft 365 Agents Playground](#microsoft-365-agents-playground)**.
+
+**SDK 2.0 (Legacy):**
+
+The playground sends unauthenticated requests, which a default `builder.AddTeams()` rejects when no credentials are configured. For local testing, enable `skipAuth` so your agent accepts them:
+
+```csharp title="Program.cs"
+builder.AddTeams(skipAuth: true);
+```
+
+:::warning
+Only use `skipAuth` for local development — never in production, as it disables inbound request authentication.
+:::
+
+**SDK 2.1 (current):**
+
+The playground sends unauthenticated requests, and SDK 2.1 rejects them by default. For local testing, enable `DangerouslyAllowUnauthenticatedRequests` in your launch settings:
+
+```json title="Properties/launchSettings.json"
+{
+  "profiles": {
+    "https": {
+      "environmentVariables": {
+        "AzureAd__DangerouslyAllowUnauthenticatedRequests": "true"
+      }
+    }
+  }
+}
+```
+
+:::warning
+Only use `DangerouslyAllowUnauthenticatedRequests` for local development — never in production, as it disables inbound request authentication.
+:::
+
+Install the playground globally:
+
+```sh
+npm install -g @microsoft/m365agentsplayground
+```
+
+Then, with your agent still running, open a second terminal and launch the playground pointed at your agent:
+
+```sh
+agentsplayground -e http://localhost:3978/api/messages -c emulator
+```
+
+The playground opens at [http://localhost:56150](http://localhost:56150). Send a message in the compose box and your agent's reply renders inline.
+
+![Microsoft 365 Agents Playground showing a user message 'hello!' and an agent reply 'you said "hello!"'.](/screenshots/agents-playground-echo-chat.png)
+
+## Add to an Existing Project
+
+If you already have a project and want to add Teams support, install the SDK directly:
+
+```sh
+dotnet add package Microsoft.Teams.Apps
+```
+// Then register the Teams services on your existing app.
+
+```csharp
+using Microsoft.Teams.Apps;
+
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddTeamsBotApplication();
+var app = builder.Build();
+
+// Maps POST /api/messages onto your existing ASP.NET Core app
+TeamsBotApplication teams = app.UseTeamsBotApplication();
+
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    await context.SendAsync($"you said: {context.Activity.Text}", cancellationToken);
+});
+
+app.Run();
+```
+`app.UseTeamsBotApplication()` registers the Teams endpoint onto your existing ASP.NET Core app.
+
+## Next steps
+
+After creating and running your first agent, read about [the code basics](#code-basics) to better understand its components and structure.
+
+Otherwise, if you want to run your agent in Teams, you can check out the [Running in Teams](running-in-teams) guide.
+
+## Resources
+
+- [Teams Developer CLI documentation](#teams-developer-cli)
+- [Microsoft 365 Agents Playground](#microsoft-365-agents-playground)
+- [Teams manifest schema](https://learn.microsoft.com/en-us/microsoftteams/platform/resources/schema/manifest-schema)
+- [Teams sideloading](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/apps-upload)
+
+---
+
+### Quickstart: Register your app
+
+# Quickstart: Register your app
+
+Register a Teams app and its bot infrastructure with the [Teams Developer CLI](#teams-developer-cli) (`@microsoft/teams.cli`). At the end you'll have a running agent installed in Teams.
+
+If you don't have an agent yet, step 3 scaffolds one using the Teams SDK. If you already have a server, skip step 3 and pass your endpoint to step 4.
+
+:::tip Let your AI assistant do this for you
+Install the [`teams-dev` skill](#agent-skills) in Claude Code, GitHub Copilot, Cursor, or VS Code, then say _"create a Teams bot"_ — your assistant runs every step on this page for you, including the tunnel setup and sideload link.
+:::
+
+## Prerequisites
+
+- Node.js 22.12 or later
+- An M365 account with **custom app upload (sideloading) enabled** on the tenant. Step 2 will check this.
+- A public HTTPS tunnel pointing at your local server (e.g. [DevTunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview), [ngrok](https://ngrok.com/)). Start it before step 4 — see [Local Tunnels](#exposing-your-local-app-with-a-tunnel) if you need setup steps.
+
+## 1. Install the CLI
+
+```bash
+npm install -g @microsoft/teams.cli
+teams --version
+```
+
+## 2. Log in
+
+```bash
+teams login
+teams status
+```
+
+`teams status` should show `Sideloading: enabled`. If it shows `disabled`, your tenant admin needs to enable [custom app upload](https://learn.microsoft.com/en-us/microsoftteams/teams-custom-app-policies-and-settings) before you can install your bot.
+
+## 3. Scaffold a project
+
+Skip this step if you're bringing your own server endpoint.
+
+**TypeScript:**
+
+```bash
+teams project new typescript echo-bot
+cd echo-bot
+```
+
+**C#:**
+
+```bash
+teams project new csharp echo-bot
+cd Echo.Bot/Echo.Bot
+```
+
+**Python:**
+
+```bash
+teams project new python echo-bot
+cd echo-bot
+```
+
+The default template is `echo`. Run `teams project new <language> --help` to see other templates available for your language.
+
+## 4. Register bot infrastructure
+
+:::note Start your tunnel first
+Teams must reach your bot over **public HTTPS** — your `localhost` port isn't reachable from Teams' servers. Before running the command below, start a tunnel (e.g. [DevTunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview) or [ngrok](https://ngrok.com/)) and replace `<tunnel-host>` with the hostname it gives you.
+
+Learn more: [Local Tunnels](#exposing-your-local-app-with-a-tunnel)
+:::
+
+Run from inside your project directory:
+
+**TypeScript:**
+
+```bash
+teams app create \
+  --name echo-bot \
+  --endpoint https://<tunnel-host>/api/messages \
+  --env .env
+```
+
+**C#:**
+
+```bash
+teams app create \
+  --name echo-bot \
+  --endpoint https://<tunnel-host>/api/messages \
+  --env appsettings.json
+```
+
+**Python:**
+
+```bash
+teams app create \
+  --name echo-bot \
+  --endpoint https://<tunnel-host>/api/messages \
+  --env .env
+```
+
+The command prints a summary including the **Teams App ID** and an **Install in Teams** link, and writes credentials into your env file.
+
+## 5. Run your agent
+
+**TypeScript:**
+
+```bash
+npm install
+npm run dev
+```
+
+**C#:**
+
+```bash
+dotnet run
+```
+
+**Python:**
+
+```bash
+pip install -e .
+python src/main.py
+```
+
+You should see `listening on port 3978 🚀` in the terminal. Your tunnel will now forward Teams traffic to your local server.
+
+## 6. Install in Teams
+
+The **Install in Teams** link from step 4 is your sideload URL. Click it from a browser signed in to Teams, then **Add**.
+
+If you closed the terminal and need the link again:
+
+```bash
+teams app get <teamsAppId> --install-link
+```
+
+Use the `Teams App ID` printed in step 4. (Run `teams app list` to see all your apps with IDs.)
+
+Send your bot a message to confirm it's working.
+
+## What's next
+
+- [Quickstart: Build your first bot](#quickstart-build-your-first-bot) — wire up handlers and reply logic
+- [Agent Skills](#agent-skills) — let your AI coding assistant run this whole flow for you
+- [CLI command reference](/cli/commands/) — every flag, every subcommand
+
+---
+
+### SSO Setup
+
+# SSO Setup
+
+This section describes how to configure the Azure Bot Service (ABS), the Entra App Registration and the Teams manifest to enable Single-Sign-On (SSO) for your Teams app.
+
+:::tip Let an AI assistant run this for you
+The [`teams-dev` skill](#agent-skills) can orchestrate the full SSO setup for you — install it in your AI coding assistant and say *"set up SSO for my Teams bot"*.
+:::
+
+## Prerequisites
+
+Before starting SSO configuration, ensure you have:
+
+- An **Azure-managed** Azure Bot Service resource and its associated Entra App Registration (Application ID / Client ID and Tenant ID).
+- To set up using CLIs: the [`az` CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) and the [Teams Developer CLI](/cli/getting-started/installation) installed and authenticated.
+
+  :::note CLI users: migrate first if your bot is Teams-managed
+  SSO requires an Azure-managed bot because the OAuth connection lives in Azure Bot Service. If you registered with `teams app create` (default Teams-managed), migrate your bot first:
+
+  ```bash
+  teams app bot migrate <appId> --subscription <id> --resource-group <rg>
+  ```
+
+  Your `CLIENT_ID`, `CLIENT_SECRET`, and `TENANT_ID` stay the same. See [Bot Locations](/cli/concepts/bot-locations) for details.
+  :::
+
+## SSO with User-Assigned Managed Identity
+
+If your bot uses **User-Assigned Managed Identity (MI)** authentication, the bot ID is the MI's client ID. Since managed identities don't have client secrets, you need a **separate Entra App Registration** for the OAuth connection used in SSO. In this setup, the IDs map differently:
+
+| Configuration | Value |
+|---------------|-------|
+| Application ID URI (Expose an API) | `api://botid-botId` (where `botId` = MI client ID) |
+| `webApplicationInfo.id` in manifest | The **auth app's** client ID (not the bot/MI ID) |
+| `webApplicationInfo.resource` in manifest | `api://botid-botId` (must match the Application ID URI) |
+| OAuth connection `ClientId` / `ClientSecret` | From the **auth app** registration |
+| OAuth connection `tokenExchangeUrl` | `api://botid-botId` (must match the Application ID URI) |
+
+:::caution
+The Application ID URI on the auth app must use the **bot ID** (MI client ID), not the auth app's own client ID. Teams requires the `botid-` prefix format and matches this URI across the manifest, OAuth connection, and Entra app registration.
+:::
+
+## Configure the Entra App Registration for SSO
+
+You need an Entra ID App Registration to configure the OAuth Connection in Azure Bot Service. If you don't already have one, follow the [Create the Entra App Registration](#azure-configuration) guide first.
+
+**Azure Portal:**
+
+1. Add the Bot Framework redirect URI. From your App Registration, navigate to **Au
