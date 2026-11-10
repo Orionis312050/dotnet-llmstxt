@@ -1,0 +1,5 @@
+e
+Both SDKs reach Microsoft 365 Copilot through the same Teams client surface. Once your bot works in Teams, [enable it in M365 Copilot](./enabling-in-copilot) with a single CLI command, then republish or reload the app. No code change required.
+:::
+
+---

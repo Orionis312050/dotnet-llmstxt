@@ -1,0 +1,897 @@
+
+## How pasted images are named and typed
+
+A pasted image has no file name, so the SDK names it `image-<attachmentId>`. Its listed metadata comes from a format hint Teams sends with the message:
+
+- `Name` gets an extension only for PNG, JPEG, GIF, or WebP, and `Extension` is taken from it, so it is absent when the name has none.
+- `ContentType` is the matching MIME type for those four formats, otherwise `application/octet-stream`.
+- `UniqueId` is always unset, because a pasted image is not stored in OneDrive or SharePoint.
+- `ContentUrl` is the image's Bot API location.
+
+On the downloaded file, `ContentType` is detected from the bytes, and the extension of `Filename` follows it, so the downloaded file name can differ from the listed name. If the bytes are not PNG, JPEG, GIF, or WebP, the listed type is used.
+
+:::note
+Teams saves a pasted GIF as a static PNG. It is listed as `.gif` and `image/gif` but downloads as a PNG.
+:::
+
+## Formats that cannot be downloaded
+
+Some image formats, such as BMP and AVIF, cannot be converted by the Teams service, so Teams shows a placeholder, and they cannot be downloaded. Downloading one of these fails with `InlineImageTransformationException`. The same image sent as a file attachment downloads normally, so asking the user to resend it that way is the recovery:
+
+```csharp
+using Microsoft.Teams.Apps.Files;
+
+try
+{
+    DownloadedFile downloaded = await image.DownloadAsync(cancellationToken);
+    // ...
+}
+catch (InlineImageTransformationException)
+{
+    await context.ReplyAsync("That pasted image cannot be downloaded. Try sending it as a file attachment instead.", cancellationToken);
+}
+```
+
+If the Bot API refuses the token presented for the image, the download fails with `InlineImageAccessException` with a `401` or `403` status. Both errors share the common base error described in [Handle errors](#receiving-files).
+
+## How the image is read
+
+A pasted image is read from the Bot API with the same token the app uses to reply in that conversation, not through Microsoft Graph. This works for traditional bots and for agentic users, which read as their own identity. Inline images list and download in personal chats, group chats, and channels. Outside personal chats, only messages that @mention the agent reach it.
+
+The token is sent only to a URL under the activity's `serviceUrl`. An inline image hosted anywhere else is skipped by `ListAsync()` with a warning in the log.
+
+## Access the raw attachments
+
+An inbound message with a pasted image typically contains two related attachments:
+
+```json
+{
+  "attachments": [
+    {
+      "contentType": "image/png",
+      "contentUrl": "https://.../v3/attachments/{id}/views/original"
+    },
+    {
+      "contentType": "text/html",
+      "content": "<p><img src=\"https://.../objects/{id}/views/imgo\" ...></p>"
+    }
+  ]
+}
+```
+
+The listed file's `Raw` holds only the `image/*` attachment. The `text/html` attachment, which preserves where the image appeared among the message's text and other content, stays in `context.Activity.Attachments`.
+
+---
+
+### PAGE: Receiving and sending messages
+
+# Receiving and sending messages
+
+Configure the blueprint client ID, credential, and tenant ID in your app's SDK credentials. Teams SDK uses them to acquire tokens for the Agentic User.
+
+## Reactive messaging
+
+An inbound Agent 365 activity includes the Agentic User in `activity.recipient`. The handler context automatically uses that identity for replies, sends, and API calls.
+
+```csharp
+teamsApp.OnMessage(async (context, cancellationToken) =>
+{
+    AgenticIdentity? agenticIdentity =
+        context.Activity.Recipient?.GetAgenticIdentity();
+
+    if (agenticIdentity?.AgenticUserId is not string agenticUserId)
+    {
+        throw new InvalidOperationException(
+            "The activity is not addressed to an Agentic User.");
+    }
+
+    await context.ReplyAsync(
+        $"Hi! I'm an Agentic User, and my user ID is {agenticUserId}. Nice to meet you!",
+        cancellationToken);
+});
+```
+
+:::note Who sends the reply?
+The example sends the reply as the Agentic User from the inbound activity, not as the blueprint. The blueprint authenticates the reusable runtime, but it isn't the conversational sender.
+:::
+
+## Bot capabilities
+
+Most Teams capabilities available to standard bots are also available to Agentic Users, including cards, reactions, and API calls. For inbound activities, the handler's API client uses the Agentic User identity automatically.
+
+This example adds a reaction to an incoming message as the Agentic User:
+
+```csharp
+teamsApp.OnMessage(async (context, cancellationToken) =>
+{
+    await context.Api.Conversations.AddReactionAsync(
+        context.Activity.Conversation.Id,
+        context.Activity.Id,
+        ReactionType.Like,
+        cancellationToken: cancellationToken
+    );
+});
+```
+
+For more reaction options, see [Message Reactions](#message-reactions).
+
+## Proactive messaging
+
+A proactive operation has no inbound activity that identifies the sender. Create an `AgenticIdentity` associated with the Agentic User, then pass it as the operation scope. The app helper supplies the required blueprint ID from app configuration; the Agentic App Instance and Agentic User IDs select the user-backed scope used by this example.
+
+```mermaid
+flowchart TD
+  R[Reactive activity] --> RI[SDK reads Agentic User<br/>from recipient]
+  RI --> RS[reply / send / API call]
+  P[Proactive job] --> PI[App supplies Agentic User]
+  PI --> PS[AgenticIdentity-scoped<br/>send / API call]
+```
+
+If your app will send proactive messages later, store the conversation ID, service URL, Agentic App Instance ID, Agentic User ID, and tenant ID in persistent storage when it receives an activity.
+
+```csharp
+var agenticIdentity = new AgenticIdentity
+{
+    AgenticAppId = agenticAppId,
+    AgenticUserId = agenticUserId,
+    AgenticAppBlueprintId = blueprintId,
+    TenantId = tenantId
+};
+
+await teamsApp.SendAsync(
+    conversationId,
+    "Your scheduled update is ready.",
+    serviceUrl,
+    agenticIdentity,
+    cancellationToken);
+
+ApiClient api = teamsApp.Api
+    .ForServiceUrl(serviceUrl)
+    .ForAgenticIdentity(agenticIdentity);
+
+await api.Conversations.AddReactionAsync(
+    conversationId,
+    activityId,
+    ReactionType.Like,
+    cancellationToken: cancellationToken);
+```
+
+---
+
+### PAGE: ⚙️ Settings
+
+# ⚙️ Settings
+
+You can add a settings page that allows users to configure settings for your app.
+
+The user can access the settings by right-clicking the app item in the compose box.
+
+<br />
+<img src=SettingsImgUrl height="300px" alt="Settings" />
+
+This guide will show how to enable user access to settings, as well as setting up a page that looks like this:
+
+![Settings Page](/screenshots/settings-page.png)
+
+## 1. Update the Teams Manifest
+
+Set the `canUpdateConfiguration` field to `true` in the desired message extension under `composeExtensions`.
+
+```json
+"composeExtensions": [
+    {
+        "botId": "${{BOT_ID}}",
+        "canUpdateConfiguration": true,
+        ...
+    }
+]
+```
+
+## 2. Serve the settings `html` page
+
+This is the code snippet for the settings `html` page:
+
+```html
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Message Extension Settings</title>
+    <link
+      rel="stylesheet"
+      href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.0/css/bootstrap.min.css"
+    />
+    <script src="https://statics.teams.cdn.office.net/sdk/v1.11.0/js/MicrosoftTeams.min.js"></script>
+    <style>
+      body {
+        margin: 0;
+        padding: 10px;
+      }
+      .form-group {
+        margin-bottom: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h3>Message Extension Settings</h3>
+      <form id="settingsForm">
+        <div class="form-group">
+          <label>Selected Option:</label>
+          <select class="form-control" id="selectedOption" name="selectedOption">
+            <option value="">Please select an option</option>
+            <option value="option1">Option 1</option>
+            <option value="option2">Option 2</option>
+            <option value="option3">Option 3</option>
+          </select>
+        </div>
+        <button type="submit" class="btn btn-primary">Save Settings</button>
+      </form>
+    </div>
+
+    <script>
+      microsoftTeams.initialize();
+
+      // Get the selectedOption from URL parameters
+      const urlParams = new URLSearchParams(window.location.search);
+      const selectedOption = urlParams.get('selectedOption');
+      if (selectedOption) {
+        document.getElementById('selectedOption').value = selectedOption;
+      }
+
+      document.getElementById('settingsForm').addEventListener('submit', function (event) {
+        event.preventDefault();
+        let selectedValue = document.getElementById('selectedOption').value;
+        microsoftTeams.tasks.submitTask(selectedValue);
+      });
+    </script>
+  </body>
+</html>
+```
+
+Save it in the `index.html` file in the same folder as where your app is initialized.
+
+You can serve it by adding the following code to your app:
+
+```csharp
+// In your startup configuration (Program.cs or Startup.cs)
+app.UseStaticFiles();
+app.MapGet("/tabs/settings", async context =>
+{
+    var html = await File.ReadAllTextAsync("wwwroot/settings.html");
+    context.Response.ContentType = "text/html";
+    await context.Response.WriteAsync(html);
+});
+```
+
+:::note
+This will serve the HTML page to the `$BOT_ENDPOINT/tabs/settings` endpoint as a tab. See [Tabs Guide](#tabs) to learn more.
+:::
+
+## 3. Specify the URL to the settings page
+
+To enable the settings page, your app needs to handle the `message.ext.query-settings-url` activity that Teams sends when a user right-clicks the app in the compose box. Your app must respond with the URL to your settings page. Here's how to implement this:
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using Microsoft.Teams.Api.Cards;
+using Microsoft.Teams.Cards;
+
+[MessageExtension.QuerySettingsUrl]
+public Microsoft.Teams.Api.MessageExtensions.Response OnMessageExtensionQuerySettingsUrl(
+    [Context] Microsoft.Teams.Api.Activities.Invokes.MessageExtensions.QuerySettingsUrlActivity activity,
+    [Context] IContext.Client client,
+    [Context] Microsoft.Teams.Common.Logging.ILogger log)
+{
+    log.Info("[MESSAGE_EXT_QUERY_SETTINGS_URL] Settings URL query received");
+
+    // Get user settings (this could come from a database or user store)
+    var selectedOption = ""; // Default or retrieve from user preferences
+
+    var botEndpoint = Environment.GetEnvironmentVariable("BOT_ENDPOINT") ?? "https://your-bot-endpoint.com";
+    var settingsUrl = $"{botEndpoint}/tabs/settings?selectedOption={Uri.EscapeDataString(selectedOption)}";
+
+    var settingsAction = new CardAction
+    {
+        Type = CardActionType.OpenUrl,
+        Title = "Settings",
+        Value = settingsUrl
+    };
+
+    var suggestedActions = new Microsoft.Teams.Api.MessageExtensions.SuggestedActions
+    {
+        Actions = new List { settingsAction }
+    };
+
+    var result = new Microsoft.Teams.Api.MessageExtensions.Result
+    {
+        Type = Microsoft.Teams.Api.MessageExtensions.ResultType.Config,
+        SuggestedActions = suggestedActions
+    };
+
+    return new Microsoft.Teams.Api.MessageExtensions.Response
+    {
+        ComposeExtension = result
+    };
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using Microsoft.Teams.Apps.MessageExtensions;
+using Microsoft.Teams.Apps.Schema;
+
+//...
+
+bot.OnQuerySettingUrl(async (context, cancellationToken) =>
+{
+    // Get user settings (this could come from a database or user store)
+    var selectedOption = ""; // Default or retrieve from user preferences
+
+    var botEndpoint = Environment.GetEnvironmentVariable("BOT_ENDPOINT") ?? "https://your-bot-endpoint.com";
+    var settingsUrl = $"{botEndpoint}/tabs/settings?selectedOption={Uri.EscapeDataString(selectedOption)}";
+
+    return MessageExtensionResponse.CreateBuilder()
+        .WithType(MessageExtensionResponseTypes.Config)
+        .WithSuggestedActions(new SuggestedAction(ActionTypes.OpenUrl, "Settings", settingsUrl))
+        .Build();
+});
+```
+
+## 4. Handle Form Submission
+
+When a user submits the settings form, Teams sends a `message.ext.setting` activity with the selected option in the `activity.value.state` property. Handle it to save the user's selection:
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+[MessageExtension.Setting]
+public Microsoft.Teams.Api.MessageExtensions.Response OnMessageExtensionSetting(
+    [Context] Microsoft.Teams.Api.Activities.Invokes.MessageExtensions.SettingActivity activity,
+    [Context] IContext.Client client,
+    [Context] Microsoft.Teams.Common.Logging.ILogger log)
+{
+    log.Info("[MESSAGE_EXT_SETTING] Settings submission received");
+
+    var state = activity.Value?.State;
+    log.Info($"[MESSAGE_EXT_SETTING] State: {state}");
+
+    if (state == "CancelledByUser")
+    {
+        log.Info("[MESSAGE_EXT_SETTING] User cancelled settings");
+        return CreateEmptyResult();
+    }
+
+    var selectedOption = state;
+    log.Info($"[MESSAGE_EXT_SETTING] Selected option: {selectedOption}");
+
+    // Here you would typically save the user's settings to a database or user store
+    // SaveUserSettings(activity.From.Id, selectedOption);
+
+    // Return empty result to close the settings dialog
+    return CreateEmptyResult();
+}
+
+// Helper method to create empty result
+private static Microsoft.Teams.Api.MessageExtensions.Response CreateEmptyResult()
+{
+    return new Microsoft.Teams.Api.MessageExtensions.Response
+    {
+        ComposeExtension = new Microsoft.Teams.Api.MessageExtensions.Result
+        {
+            Type = Microsoft.Teams.Api.MessageExtensions.ResultType.Result,
+            AttachmentLayout = Microsoft.Teams.Api.Attachment.Layout.List,
+            Attachments = new List()
+        }
+    };
+}
+```
+
+**SDK 2.1 (current):**
+
+SDK 2.1 does not have a dedicated settings-submission handler. Inside your existing `OnInvoke` handler, check for `composeExtension/setting`:
+
+```csharp
+bot.OnQuerySetting(async (context, cancellationToken) =>
+{
+    string? state = context.Activity.Value?.State;
+
+    if (state != "CancelledByUser")
+    {
+        // Save the user's settings here
+        // SaveUserSettings(context.Activity.From.Id, state);
+    }
+
+    return new InvokeResponse(200);
+});
+```
+
+---
+
+### PAGE: 📖 Message Extensions
+
+# 📖 Message Extensions
+
+Message extensions (or Compose Extensions) allow your application to hook into messages that users can send or perform actions on messages that users have already sent. They enhance user productivity by providing quick access to information and actions directly within the Teams interface. Users can search or initiate actions from the compose message area, the command box, or directly from a message, with the results returned as richly formatted cards that make information more accessible and actionable.
+
+There are two types of message extensions: [API-based](https://learn.microsoft.com/en-us/microsoftteams/platform/messaging-extensions/api-based-overview) and [Bot-based](https://learn.microsoft.com/en-us/microsoftteams/platform/messaging-extensions/build-bot-based-message-extension?tabs=search-commands). API-based message extensions use an OpenAPI specification that Teams directly queries, requiring no additional application to build or maintain, but offering less customization. Bot-based message extensions require building an application to handle queries, providing more flexibility and customization options. This SDK supports bot-based message extensions only.
+
+## Resources
+
+- [What are message extensions?](https://learn.microsoft.com/en-us/microsoftteams/platform/messaging-extensions/what-are-messaging-extensions?tabs=desktop)
+
+---
+
+### PAGE: Agentic User lifecycle events
+
+# Agentic User lifecycle events
+
+Agent 365 sends lifecycle events when an Agentic User is created or when its identity, manager, availability, deletion status, or workload onboarding changes. These events let your app keep its state and behavior synchronized with Microsoft 365.
+
+For example, your app can initialize per-agent storage after creation, update ownership when the manager changes, pause scheduled work when the Agentic User is disabled, clean up access after deletion, and wait for Teams onboarding before sending messages.
+
+## Supported events
+
+| Event                         | Typical use                                           |
+| ----------------------------- | ----------------------------------------------------- |
+| Agentic User identity created | Initialize per-agent configuration and state          |
+| Identity property updated     | Refresh mail, alias, or user principal name data      |
+| Manager updated               | Update ownership, approval, or escalation routing     |
+| Enabled                       | Resume work for the Agentic User                      |
+| Disabled                      | Stop scheduled or proactive work                      |
+| Deleted                       | Disable access and begin cleanup                      |
+| Undeleted                     | Restore state after the Agentic User is restored      |
+| Workload onboarding updated   | Wait for Teams onboarding to succeed before messaging |
+
+The event names in activity payloads use `AgenticUser*`, such as `AgenticUserIdentityCreated` and `AgenticUserDisabled`.
+
+## Register handlers
+
+Register a general handler when you need common processing for every lifecycle event. Register typed handlers when you need the payload for a specific variant.
+
+```csharp
+teamsApp.OnAgentLifecycle((context, _) =>
+{
+    context.Log.LogInformation(
+        "Lifecycle event: {ValueType}",
+        context.Activity.ValueType);
+    return Task.CompletedTask;
+});
+
+teamsApp.OnAgenticUserIdentityCreated((context, _) =>
+{
+    context.Log.LogInformation(
+        "Agentic User created: {AgenticUserId}",
+        context.Activity.Value?.AgenticUserId);
+    return Task.CompletedTask;
+});
+
+teamsApp.OnAgenticUserIdentityUpdated((context, _) =>
+{
+    context.Log.LogInformation(
+        "Agentic User identity updated: {UpdatedProperty}",
+        context.Activity.Value?.UpdatedProperty);
+    return Task.CompletedTask;
+});
+
+teamsApp.OnAgenticUserManagerUpdated((context, _) =>
+{
+    context.Log.LogInformation(
+        "Agentic User manager updated: {Manager}",
+        context.Activity.Value?.Manager);
+    return Task.CompletedTask;
+});
+
+teamsApp.OnAgenticUserEnabled((context, _) =>
+{
+    context.Log.LogInformation(
+        "Agentic User enabled: {AgenticUserId}",
+        context.Activity.Value?.AgenticUserId);
+    return Task.CompletedTask;
+});
+
+teamsApp.OnAgenticUserDisabled((context, _) =>
+{
+    context.Log.LogInformation(
+        "Agentic User disabled: {AgenticUserId}",
+        context.Activity.Value?.AgenticUserId);
+    return Task.CompletedTask;
+});
+
+teamsApp.OnAgenticUserDeleted((context, _) =>
+{
+    context.Log.LogInformation(
+        "Agentic User deleted: {DeletionReason}",
+        context.Activity.Value?.DeletionReason);
+    return Task.CompletedTask;
+});
+
+teamsApp.OnAgenticUserUndeleted((context, _) =>
+{
+    context.Log.LogInformation(
+        "Agentic User restored: {AgenticUserId}",
+        context.Activity.Value?.AgenticUserId);
+    return Task.CompletedTask;
+});
+
+teamsApp.OnAgenticUserWorkloadOnboardingUpdated((context, _) =>
+{
+    context.Log.LogInformation(
+        "Agentic User workload onboarding updated: {WorkloadName} ({State})",
+        context.Activity.Value?.WorkloadName,
+        context.Activity.Value?.WorkloadOnboardingState);
+    return Task.CompletedTask;
+});
+```
+
+---
+
+### PAGE: Bot-to-Bot Communication with A2A
+
+# Bot-to-Bot Communication with A2A
+
+:::warning[Our AI libraries are deprecated]
+The Teams SDK has deprecated its own AI libraries — the `@microsoft/teams.ai` packages (`ChatPrompt`, `Model`, and the older `@microsoft/teams.mcp` / `@microsoft/teams.a2a` plugins) — in favor of dedicated AI frameworks. Use the pattern shown in these guides instead: bring the OpenAI SDK (or any framework you like), and wire MCP and A2A directly into your Teams app.
+:::
+
+:::warning[SDK 2.0 AI libraries are deprecated]
+For .NET, implement A2A with SDK 2.1 plus an external A2A protocol library. Use Teams SDK handlers for inbound user turns and proactive messaging, and use A2A messages for bot-to-bot handoff coordination.
+:::
+
+Agents are typically designed to interact either with people (chatbots) or with systems (tools, APIs, MCP servers). [Agent2Agent](https://a2a-protocol.org/) (A2A) introduces a third interaction model: agents communicating directly with other agents as peers — each with its own model, capabilities, and human audience.
+
+This guide walks through a **handoff** between two Teams bots, **Alice** and **Bob**, each backed by its own LLM agent. A user DMs one bot; its agent reads the peer's capability description and decides whether to answer directly or hand the user off. On handoff, the receiving bot **proactively opens a 1:1 chat** with the user and greets them with the context that came across — so the conversation continues seamlessly in the new chat.
+
+This guide is based on [`core/samples/A2ABot`](https://github.com/microsoft/teams.net/tree/main/core/samples/A2ABot): two SDK 2.1 bots run the same code with different config and hand users off through A2A.
+
+## Advertising capabilities with an Agent Card
+
+Every A2A server publishes an `AgentCard` — a small machine-readable document describing who the agent is and what it can do. Peers fetch this card to learn about each other; their LLMs then read the `description` field to decide *when* to hand off a user.
+
+The sample publishes an A2A `AgentCard` per bot:
+
+```csharp
+public static AgentCard Build(Config config) => new()
+{
+    Name = config.Name,
+    Description = config.Description,
+    SupportedInterfaces =
+    [
+        new AgentInterface
+        {
+            Url = $"{config.SelfUrl}/a2a",
+            ProtocolBinding = "JSONRPC",
+            ProtocolVersion = "1.0",
+        }
+    ],
+    Skills =
+    [
+        new AgentSkill
+        {
+            Id = "handoff",
+            Name = "Handoff",
+            Description = $"Accepts handoffs of users from peer bots. Specialty: {config.Description}",
+        }
+    ],
+};
+```
+
+The `description` is the most important knob in this sample — it's the natural-language summary another bot's LLM uses to decide whether *this* bot is the right peer for a given user. Tweak it to match the persona and expertise you want each bot to advertise.
+
+## The handoff message contract
+
+A handoff carries everything the receiving bot needs to reach the user proactively: their **`aadObjectId`** (the tenant-wide identity both bots share — the Teams MRI one bot sees isn't valid against the other), the **`tenantId`**, the **`serviceUrl`**, and a **`summary`** of the conversation so the peer can pick up cold.
+
+Use a strict handoff payload contract:
+
+```csharp
+internal record HandoffMessage(
+    string Kind,
+    string AadObjectId,
+    string UserName,
+    string Summary,
+    string From,
+    string TenantId,
+    string ServiceUrl);
+```
+
+## LLM-driven handoff
+
+Routing is not a hard-coded rule — the LLM decides. Each bot exposes a single `handoff_to_peer` tool to its agent, and the agent's instructions include the live `AgentCard.description` of the peer. When a question fits the peer's expertise better than its own, the model calls the tool.
+
+The model gets one handoff tool that calls A2A:
+
+```csharp
+AIFunction handoffTool = AIFunctionFactory.Create(HandoffToPeerAsync, new AIFunctionFactoryOptions
+{
+    Name = "handoff_to_peer",
+    Description = $"Hand off the current user to {_config.PeerName} when {_config.PeerName}'s expertise is a better fit.",
+});
+```
+
+Then send structured handoff data:
+
+```csharp
+await _a2aClient.SendHandoffAsync(
+    new HandoffMessage("handoff", turn.AadObjectId, turn.UserName, summary, _config.Name, turn.TenantId, turn.ServiceUrl),
+    ct);
+```
+
+The identity needed to build the handoff is captured from the inbound Teams activity and stashed for the duration of the turn, so the tool callback can reach it without threading it through every call. A handoff *greeting* runs with no identity set — the tool guards against that to prevent a ping-pong.
+
+## Sending a handoff over A2A
+
+The outbound side resolves the peer's `AgentCard` once (so the agent can read its live description into the tool), then ships the handoff as a `DataPart`.
+
+The outbound client resolves and caches the peer card once:
+
+```csharp
+A2ACardResolver resolver = new(new Uri(config.PeerUrl), http);
+AgentCard card = await resolver.GetAgentCardAsync(ct);
+global::A2A.A2AClient client = new(new Uri(card.SupportedInterfaces[0].Url), http);
+```
+
+Then posts the handoff as a `Data` part.
+
+## Receiving a handoff
+
+The inbound side implements the A2A protocol's executor interface. For each inbound message it pulls the handoff out of the `DataPart`, opens a fresh 1:1 with the user against **their** `serviceUrl`, asks the agent to seed that conversation's history with the handoff context and produce a greeting, sends the greeting proactively, and acks back so the sender's call resolves.
+
+Inbound A2A creates a 1:1 conversation and sends a proactive greeting:
+
+```csharp
+CreateConversationResponse conv = await conversations.CreateConversationAsync(
+    new ConversationParameters
+    {
+        IsGroup = false,
+        TenantId = handoff.TenantId,
+        Members = [new TeamsChannelAccount { Id = handoff.AadObjectId }],
+    },
+    serviceUrl,
+    cancellationToken: ct);
+
+string greeting = await agent.GreetWithHandoffAsync(newConvId, handoff.From, handoff.UserName, handoff.Summary, ct);
+await conversations.SendActivityAsync(newConvId, new MessageActivityInput().WithText(greeting), serviceUrl, cancellationToken: ct);
+```
+
+Because the greeting turn is left in the per-conversation history, when the user replies in their new DM the agent picks up coherently.
+
+## Wiring A2A into your Teams app
+
+The Teams bot and A2A server run in the same process and share one HTTP surface: `/api/messages` for Teams, `/a2a` for inbound handoffs, and `/.well-known/agent-card.json` for the AgentCard.
+
+Teams + A2A are hosted in one ASP.NET app:
+
+```csharp
+builder.Services.AddTeamsBotApplication();
+builder.Services.AddA2AAgent(agentCard);
+
+WebApplication webApp = builder.Build();
+TeamsBotApplication teamsApp = webApp.UseTeamsBotApplication();
+
+webApp.MapA2A("/a2a");
+webApp.MapWellKnownAgentCard(agentCard);
+webApp.Run();
+```
+
+Each bot needs its own Teams app registration (so DMs route to the right bot) and its own port. The sample runs Alice on `3978` and Bob on `3979`; their peer URLs point at each other.
+
+## Putting it all together
+
+With both bots running and installed for the user, DM Alice with a question outside her specialty and watch the round-trip: Alice's LLM calls `handoff_to_peer`, Bob receives it over A2A, opens a new 1:1 with the user, and greets them with an answer already in hand. The bots are symmetric — the same flow runs the other way from Bob to Alice.
+
+<img
+  src=A2AImgUrl
+  alt="Animated screenshot of the end-to-end A2A handoff: a user DMs Alice, Alice hands off to Bob, and Bob opens a new chat greeting the user with context."
+  style={ width: '100%', maxWidth: 900 }
+/>
+
+:::warning
+This sample configures no authenticator on the A2A endpoint, so any caller can post a handoff. For production, validate the caller's identity (a bearer token or mTLS) before opening a conversation with someone they named.
+:::
+
+---
+
+### PAGE: Feedback
+
+# Feedback
+
+User feedback is essential for the improvement of any application. Teams provides specialized UI components to help facilitate the gathering of feedback from users.
+
+![Animated image showing user selecting the thumbs-up button on an agent response and a dialog opening asking 'What did you like?'. The user types 'Nice' and hits Submit.](#feedback)
+
+## Storage
+
+Once you receive a feedback event, you can choose to store it in some persistent storage. In the example below, we are storing it in an in-memory store.
+
+```csharp
+// This store would ideally be persisted in a database
+public static class FeedbackStore
+{
+    public static readonly Dictionary<string, FeedbackData> StoredFeedbackByMessageId = new();
+
+    public class FeedbackData
+    {
+        public string IncomingMessage { get; set; } = string.Empty;
+        public string OutgoingMessage { get; set; } = string.Empty;
+        public int Likes { get; set; }
+        public int Dislikes { get; set; }
+        public List<string> Feedbacks { get; set; } = new();
+    }
+}
+```
+
+## Including Feedback Buttons
+
+When sending a message that you want feedback in, simply add feedback functionality to the message you are sending.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+    using Microsoft.Teams.Api.Activities;
+    using Microsoft.Teams.Apps.Annotations;
+
+    MessageActivity activity;
+    if (result.Content != null)
+    {
+        activity = new MessageActivity(result.Content)
+            .AddAiGenerated()
+            /** Add feedback buttons via this method */
+            .AddFeedback();
+    }
+    else
+    {
+        activity = new MessageActivity("I did not generate a response.");
+    }
+
+    var sentActivity = await context.Client.Send(activity);
+
+    FeedbackStore.StoredFeedbackByMessageId[sentActivity.Id] = new FeedbackStore.FeedbackData
+    {
+        IncomingMessage = context.Activity.Text,
+        OutgoingMessage = result.Content ?? string.Empty,
+        Likes = 0,
+        Dislikes = 0,
+        Feedbacks = new List<string>()
+    };
+    ```
+
+**SDK 2.1 (current):**
+
+```csharp
+    using Microsoft.Teams.Apps;
+
+    SendActivityResponse? sentResponse;
+
+    if (result.Content != null)
+    {
+        MessageActivityInput activity = new MessageActivityInput()
+            .WithText(result.Content)
+            .AddAIGenerated()
+            /** Add feedback buttons via this method */
+            .AddFeedback();
+        sentResponse = await context.SendAsync(activity, cancellationToken);
+    }
+    else
+    {
+        sentResponse = await context.SendAsync("I did not generate a response.", cancellationToken);
+    }
+
+    if (sentResponse?.Id != null)
+    {
+        FeedbackStore.StoredFeedbackByMessageId[sentResponse.Id] = new FeedbackStore.FeedbackData
+        {
+            IncomingMessage = context.Activity.Text,
+            OutgoingMessage = result.Content ?? string.Empty,
+            Likes = 0,
+            Dislikes = 0,
+            Feedbacks = new List<string>()
+        };
+    }
+    ```
+
+## Handling the feedback
+
+Once the user decides to like/dislike the message, you can handle the feedback in a received event. Once received, you can choose to include it in your persistent store.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+    using Microsoft.Teams.Apps.Annotations;
+
+    [TeamsController]
+    public class FeedbackController
+    {
+        [Microsoft.Teams.Apps.Activities.Invokes.Message.Feedback]
+        public Task OnFeedbackReceived([Context] Microsoft.Teams.Api.Activities.Invokes.Messages.SubmitActionActivity activity)
+        {
+            var reaction = activity.Value?.ActionValue?.GetType().GetProperty("reaction")?.GetValue(activity.Value?.ActionValue)?.ToString();
+            var feedbackJson = activity.Value?.ActionValue?.GetType().GetProperty("feedback")?.GetValue(activity.Value?.ActionValue)?.ToString();
+
+            if (activity.ReplyToId == null)
+                return Task.CompletedTask;
+
+            var existingFeedback = FeedbackStore.StoredFeedbackByMessageId.GetValueOrDefault(activity.ReplyToId);
+
+            if (existingFeedback != null)
+            {
+                FeedbackStore.StoredFeedbackByMessageId[activity.ReplyToId] = new FeedbackStore.FeedbackData
+                {
+                    IncomingMessage = existingFeedback.IncomingMessage,
+                    OutgoingMessage = existingFeedback.OutgoingMessage,
+                    Likes = existingFeedback.Likes + (reaction == "like" ? 1 : 0),
+                    Dislikes = existingFeedback.Dislikes + (reaction == "dislike" ? 1 : 0),
+                    Feedbacks = existingFeedback.Feedbacks.Concat(new[] { feedbackJson ?? string.Empty }).ToList()
+                };
+            }
+
+            return Task.CompletedTask;
+        }
+    }
+    ```
+
+**SDK 2.1 (current):**
+
+```csharp
+    using Microsoft.Teams.Apps;
+
+    bot.OnMessageSubmitFeedback((context, cancellationToken) =>
+    {
+        MessageSubmitFeedbackValue? feedback = context.Activity.Value;
+        var reaction = feedback?.Reaction;
+        var feedbackText = feedback?.Feedback;
+
+        if (context.Activity.ReplyToId == null)
+            return Task.FromResult(InvokeResponse.Ok());
+
+        var existingFeedback = FeedbackStore.StoredFeedbackByMessageId.GetValueOrDefault(context.Activity.ReplyToId);
+
+        if (existingFeedback != null)
+        {
+            FeedbackStore.StoredFeedbackByMessageId[context.Activity.ReplyToId] = new FeedbackStore.FeedbackData
+            {
+                IncomingMessage = existingFeedback.IncomingMessage,
+                OutgoingMessage = existingFeedback.OutgoingMessage,
+                Likes = existingFeedback.Likes + (reaction == "like" ? 1 : 0),
+                Dislikes = existingFeedback.Dislikes + (reaction == "dislike" ? 1 : 0),
+                Feedbacks = existingFeedback.Feedbacks.Concat(new[] { feedbackText ?? string.Empty }).ToList()
+            };
+        }
+
+        return Task.FromResult(InvokeResponse.Ok());
+    });
+    ```
+
+A message sent from the feedback handler is placed relative to the message that carries the feedback buttons.
+In a 1:1 chat, when that message is inside a thread, the message is sent into the thread.
+See [Responding to edits, reactions and card actions](#sending-messages).
+
+---
+
+### PAGE: Security Policy
+
+# Security Policy
+
+A widget's `securityPolicy` declares which origins the widget is allowed to reach for network requests, static resources, nested iframes, and base URIs.
+The Teams client enforces this policy through the browser's Content Security Policy.
+The SDK adds two helpers to make working with the policy easier.
+
+:::warning Preview
+HTML Widgets are in preview and the API surface may change. HTML Widgets are planned for public preview on 11/16.
+:::
+
+:::note Not a security boundary
+These helpers are development-time convenience aids for catching policy mistakes early, not a security boundary in themselves. Treat them as a supplement to, not a replacement for, the Teams client's runtime enforcement and your own review and hardening of the HTML your app sends.
+:::
+
+## Declaring a policy
+
+A security policy is a set of allow-lists you attach to a widget payload under `securityPolicy`. Each field lists the origins the widget may use for one kind of request:
+
+| Field | Covers |
+|-------|--------|
+| `connectDomains` | Network requests the widget makes (`fetch`, `XMLHttpRequest`, WebSocket). |
+| `resourceDomains` | Static resources the widget loads (scripts, styles, fonts, images). |
+| `frameDomains` | Origins the widget may embed in nested iframes. |
+| `baseUriDomains` | Values the 

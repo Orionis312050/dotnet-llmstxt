@@ -1,0 +1,692 @@
+hey appear as regular inline messages in a conversation. Other participants won't see these messages.
+
+When sending targeted messages proactively, you must explicitly specify the recipient account.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+// When sending proactively, you must provide an explicit recipient account
+public static async Task SendTargetedNotification(string conversationId, Account recipient)
+{
+    var teams = app.UseTeams();
+    await teams.Send(
+        conversationId,
+        new MessageActivity("This is a private notification just for you!")
+            .WithRecipient(recipient, isTargeted: true)
+    );
+}
+```
+
+**SDK 2.1+:**
+
+```csharp
+// When sending proactively, you must provide an explicit recipient account
+public static async Task SendTargetedNotification(
+    string conversationId,
+    Account recipient,
+    CancellationToken cancellationToken = default)
+{
+    await app.SendAsync(
+        conversationId,
+        new MessageActivityInput()
+            .WithText("This is a private notification just for you!")
+            .WithRecipient(recipient, isTargeted: true),
+        cancellationToken: cancellationToken);
+}
+```
+
+## Proactive Threading
+
+The SDK sends messages into reply chains (threads) in channels and 1:1 chats.
+Whether a thread is shown depends on the service and the Teams client.
+The SDK sends a response from a handler through the reply chain route only when `channelData.replyChain.id` is present on the inbound activity.
+With no `replyChain`, the SDK skips that route and sends to the inbound conversation.
+In a channel, the suffix of that conversation id can still keep the response in the thread.
+
+In this guide, top-level means a message in the main chat or channel conversation, and in-thread means a message in a reply chain (thread).
+
+The `app` methods take explicit ids, so they work outside a handler.
+Given the id of the chat or channel (`channelData.chat.id` or `channelData.channel.id`), in 1:1 chats and channels they place the message as follows:
+
+| Method | 1:1 chat | Channel |
+|---|---|---|
+| `app.SendAsync()` | Top-level | Top-level |
+| `app.ReplyAsync()` | In-thread | In-thread |
+
+To proactively send a message as a reply in a thread, use `app.Reply()` (SDK 2.0) / `app.ReplyAsync()` (SDK 2.1+, reply chain routing in SDK 2.2) with the id of the chat or channel and the id of the top-level message of the thread.
+Take the ids from `channelData` on the inbound activity:
+
+- **Chat id:** `channelData.chat.id`, in a 1:1 chat.
+- **Channel id:** `channelData.channel.id`, in a channel.
+- **Reply chain id:** `channelData.replyChain.id`, the id of the top-level message of the thread.
+  - A `replyChain.id` that matches the message's own `activity.Id` indicates a top-level post.
+    A different `replyChain.id` indicates the message is in-thread.
+  - If `replyChain` is absent, there is no reply chain id to take from the inbound activity, so pass an id you stored yourself.
+    The SDK does not take it from the conversation id.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+// SDK 2.0 builds the thread address from a channel id and the numeric id of the root message
+await app.Reply(channelId, messageId, "Thread update!");
+```
+
+**SDK 2.2:**
+
+```csharp
+// chatOrChannelId is channelData.chat.id or channelData.channel.id
+// replyChainId is channelData.replyChain.id
+await app.ReplyAsync(chatOrChannelId, replyChainId, "Thread update!", cancellationToken: cancellationToken);
+```
+
+To send a new top-level (non-threaded) message instead, send to the id of the chat or channel with `app.Send()` (SDK 2.0) / `app.SendAsync()` (SDK >= 2.1).
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+// Send a new top-level message to a channel
+await app.Send(channelId, "Hello!");
+```
+
+**SDK 2.2:**
+
+```csharp
+// Send a new top-level message to the chat or channel
+await app.SendAsync(chatOrChannelId, "Hello!", cancellationToken: cancellationToken);
+```
+
+If the reply chain call fails, `app.ReplyAsync()` throws the error to your code.
+It does not fall back to another route.
+
+Inside a handler, a response goes to the `ServiceUrl` of the inbound activity.
+`app.SendAsync()` and `app.ReplyAsync()` go to the `serviceUrl` argument when you pass one, and otherwise to the service URL of the last inbound activity the app received.
+There is no default, so the call throws `InvalidOperationException` until the app has received an activity.
+
+A service URL without its cloud segment can be accepted and still post the message flat, outside the thread.
+Store the full service URL of the inbound activity, and pass or configure it for proactive calls, instead of rebuilding or trimming it.
+
+The API client's reply operation, `Api.Conversations.ReplyToActivityAsync()`, is a plain send to the conversation it is given.
+It posts to the activities route of that conversation and does not place the message in a reply chain.
+To call the reply chain route directly, use `Api.Conversations.CreateReplyChainActivityAsync()`, which is experimental.
+It takes the chat or channel id and the reply chain id, and has no fallback.
+
+If you stored a conversation id from a channel message, it ends in `;messageid=<root post id>`.
+That form identifies the thread, not the chat or channel, and the reply chain endpoint rejects it.
+Store `channelData.chat.id` or `channelData.channel.id` and `channelData.replyChain.id` instead.
+
+A proactive call has no inbound activity to take an identity from.
+When the recipient is an agentic user, pass its identity from the inbound activity's recipient.
+Without it, the call uses the app's own credentials instead of the agentic user's.
+An agentic app cannot get an app-only token, so the call fails with an authentication error (`AADSTS82001`) and nothing is sent.
+
+```csharp
+// SDK 2.2 and later. AgenticIdentity is null unless the recipient is an agentic user
+await app.ReplyAsync(
+    chatOrChannelId,
+    replyChainId,
+    "Thread update!",
+    agenticIdentity: context.Activity.Recipient?.GetAgenticIdentity(),
+    cancellationToken: cancellationToken);
+```
+
+For reactive threading (within a handler), see [Threading](./#threading).
+
+---
+
+### PAGE: Sovereign Cloud Configuration
+
+# Sovereign Cloud Configuration
+
+:::info
+Most developers do not need this page. It applies only to bots deployed in US Government (GCC-High, DoD) or China (21Vianet) cloud environments. If your bot runs in the standard commercial cloud, no additional configuration is needed.
+:::
+
+Sovereign clouds use separate Azure infrastructure with different service endpoints for authentication, token services, and bot communication. The Teams SDK handles this automatically when you specify your cloud environment.
+
+## Supported Clouds
+
+| Cloud | Value | Azure Portal | Teams Client |
+|-------|-------|-------------|-------------|
+| Public (default) | `Public` | portal.azure.com | teams.microsoft.com |
+| US Gov (GCCH) | `USGov` | portal.azure.us | gov.teams.microsoft.us |
+| US Gov (DoD) | `USGovDoD` | portal.azure.us | dod.teams.microsoft.us |
+| China (21Vianet) | `China` | portal.azure.cn | n/a |
+
+## Prerequisites
+
+- A Teams tenant in the corresponding cloud environment
+- An Azure Bot resource and app registration in the sovereign cloud portal
+
+## Configuration
+
+**SDK 2.0 (Legacy):**
+
+The configuration below is only valid for **SDK 2.0** apps. It uses SDK 2.0 `Teams:Cloud` presets and per endpoint overrides. 
+In `appsettings.json`:
+
+```json
+{
+  "Teams": {
+    "ClientId": "your-client-id",
+    "ClientSecret": "your-client-secret",
+    "TenantId": "your-tenant-id",
+    "Cloud": "USGov",
+    "LoginTenant": "your-tenant-id"
+  }
+}
+```
+
+Or programmatically:
+
+```csharp
+var app = new App(new AppOptions
+{
+    Cloud = CloudEnvironment.USGov,
+    Credentials = new ClientCredentials("client-id", "client-secret")
+});
+```
+
+**Available cloud presets:** `CloudEnvironment.Public`, `CloudEnvironment.USGov`, `CloudEnvironment.USGovDoD`, `CloudEnvironment.China`
+
+Available override properties: `LoginEndpoint`, `LoginTenant`, `BotScope`, `TokenServiceUrl`, `OpenIdMetadataUrl`, `TokenIssuer`, `GraphScope`
+
+**SDK 2.1 (current):**
+
+For 2.1, configure sovereign cloud endpoints as shown below.
+
+```json title="Properties/launchSettings.json (US Gov example)"
+{
+  "profiles": {
+    "YourBot": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "AzureAd__Instance": "https://login.microsoftonline.us/",
+        "AzureAd__TenantId": "your-tenant-id",
+        "AzureAd__ClientId": "your-client-id",
+        "BotFramework__OpenIdMetadataUrl": "https://login.botframework.azure.us/v1/.well-known/openid-configuration",
+        "BotFramework__BotTokenIssuer": "https://api.botframework.us"
+      }
+    }
+  }
+}
+```
+
+For deployed environments, set equivalent values via app configuration or environment variables. When these aren't set, the SDK defaults to public-cloud endpoints.
+
+## What the SDK Configures Automatically
+
+When you set a cloud environment, the SDK automatically uses the correct endpoints for:
+
+- **Login authority**: where tokens are acquired (e.g. `login.microsoftonline.us` for GCCH)
+- **Bot token scope**: the OAuth scope for bot-to-service communication
+- **Token service URL**: where user OAuth tokens are managed
+- **JWT validation**: the signing keys and issuers used to verify inbound activity tokens
+- **OpenID metadata**: the discovery endpoint for token validation configuration
+
+You do not need to configure these endpoints individually.
+
+## Next Steps
+
+After configuring your cloud environment, your bot will authenticate and communicate using the correct sovereign cloud endpoints. No other code changes are needed; OAuth flows and all other SDK features work identically across clouds.
+
+## Troubleshooting
+
+### Bot fails to acquire a token at startup
+
+**Symptom:** The SDK logs `AADSTS500011` (resource principal not found) or `AADSTS700016` (application not found in directory) when the app starts.
+
+**Cause:** The bot's app registration lives in the wrong cloud's tenant. Sovereign clouds (USGov, USGovDoD, China) have separate Azure AD instances from the public cloud, and an app registered in the commercial cloud cannot authenticate to a sovereign tenant (and vice versa).
+
+**Fix:** Register the bot in the sovereign cloud portal that matches your `cloud` setting. For USGov/DoD use `portal.azure.us`, for China use `portal.azure.cn`.
+
+### Inbound activities are rejected with "issuer mismatch" or "audience invalid"
+
+**Symptom:** Token validation fails on inbound `/api/messages` requests. Logs show `IDX10204` or `IDX10214`.
+
+**Cause:** The bot is configured for the wrong cloud, so its JWT validator expects tokens signed by a different issuer than the one your sovereign Bot Channel Service uses.
+
+**Fix:** Confirm the `cloud` setting matches the cloud your Azure Bot resource was created in. The SDK derives the expected issuer and JWKS URI from this setting; mismatching the cloud breaks token validation even when the credentials are otherwise valid.
+
+### China bots fail user OAuth flows with the multi-tenant login URL
+
+**Symptom:** OAuth or user-token flows fail in China with login redirects that do not resolve.
+
+**Cause:** China sovereign cloud does not have a stable multi-tenant login alias. Single-tenant bots must point to their specific tenant explicitly via a `LoginTenant` override.
+
+**Fix:** Override `loginTenant` on the China preset to your tenant ID.
+
+For other authentication errors not specific to sovereign clouds, see the [App Authentication](#app-authentication) guide.
+
+---
+
+### PAGE: Middleware
+
+# Middleware
+
+**Turn middleware** is how a 2.1 app runs logic on *every* activity it receives — before that activity reaches your handlers. Use it for cross-cutting concerns like logging, metrics, and request enrichment.
+
+```mermaid
+flowchart LR
+    Teams["Teams"]:::less-interesting
+    Server["App Server<br/>(ASP.NET Core)"]:::interesting
+    Middleware["Turn Middleware<br/>(every turn)"]:::interesting
+    Handlers["Activity Handlers"]:::interesting
+    Lifecycle["App Lifecycle & Errors<br/>(IHostApplicationLifetime,<br/>try/catch, context.Log)"]:::interesting
+
+    Teams --> |Activity| Server
+    Server --> Middleware
+    Middleware --> Handlers
+    Server -.-> Lifecycle
+
+    linkStyle 0,1,2 stroke:#b1650f,stroke-width:1px
+    linkStyle 3 stroke:#b1650f,stroke-width:1px,stroke-dasharray:4
+    classDef interesting fill:#b1650f,stroke:#333,stroke-width:4px;
+```
+
+## Relationship to SDK 2.0
+
+If you're coming from SDK 2.0, the plugin event bus is gone. The table below maps each thing you used to handle in 2.0 onto its 2.1 mechanism:
+
+**SDK 2.0 (Legacy):**
+
+| **Event Name**      | **Description**                                                                |
+| ------------------- | ------------------------------------------------------------------------------ |
+| `start`             | Triggered when your application starts. Useful for setup or boot-time logging. |
+| `signin`            | Triggered during a sign-in flow via Teams.                                     |
+| `error`             | Triggered when an unhandled error occurs in your app. Great for diagnostics.   |
+| `activity`          | A catch-all for incoming Teams activities (messages, commands, etc.).          |
+| `activity.response` | Triggered when your app sends a response to an activity. Useful for logging.   |
+| `activity.sent`     | Triggered when an activity is sent (not necessarily in response).              |
+
+**SDK 2.1 (current):**
+
+In SDK 2.1 there is no separate plugin event bus. Instead, these concerns map onto standard .NET building blocks:
+
+| **What you want to react to** | **How you handle it in 2.1** |
+| ----------------------------- | ---------------------------- |
+| Cross-cutting logic on every turn (logging, metrics, enrichment) | **Turn middleware** — implement `ITurnMiddleware` and register with `teams.UseMiddleware(...)` |
+| Incoming Teams activity       | Dedicated handlers (`OnMessage`, `OnMembersAdded`, `OnInstall`, …) or `OnEvent` for custom event activities |
+| App start / stop              | ASP.NET Core `IHostApplicationLifetime` (`ApplicationStarted`, `ApplicationStopping`) |
+| Sign-in completed / failed    | `teams.GetOAuthFlow(name).OnSignInComplete(...)` / `OnSignInFailure(...)` |
+| Unhandled error in a handler  | `try`/`catch` with `context.Log`, or standard ASP.NET Core exception handling (`BotHandlerException` wraps the failure) |
+
+## Turn middleware
+
+Turn middleware runs on every incoming activity, in registration order, before your activity handlers. Implement `ITurnMiddleware` — do your work, then call `nextTurn` to pass control down the pipeline — and register it with `teams.UseMiddleware(...)`. This is the right place for logging, metrics, or any logic that should apply to the whole app.
+
+For example, to observe (a catch-all) and log every incoming activity:
+
+**SDK 2.0 (Legacy):**
+
+When an activity is received, log its `JSON` payload.
+
+```csharp
+app.OnActivity((sender, @event) =>
+{
+    app.Logger.Info(@event.Activity.ToString());
+});
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Core;
+using Microsoft.Teams.Core.Schema;
+
+internal class ActivityLoggingMiddleware : ITurnMiddleware
+{
+    public async Task OnTurnAsync(
+        BotApplication botApplication,
+        CoreActivity activity,
+        NextTurn nextTurn,
+        CancellationToken cancellationToken = default)
+    {
+        // When an activity is received, log its payload.
+        Console.WriteLine(activity.ToString());
+        await nextTurn(cancellationToken);
+    }
+}
+```
+
+Register it during startup:
+
+```csharp
+teams.UseMiddleware(new ActivityLoggingMiddleware());
+```
+
+## Handling errors
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnError((sender, @event) =>
+{
+    // do something with the error
+    app.Logger.Info(@event.Exception.ToString());
+});
+```
+
+**SDK 2.1 (current):**
+
+Handle errors where they occur and log them through `context.Log`:
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    try
+    {
+        // ... your handler logic
+    }
+    catch (Exception ex)
+    {
+        // do something with the error
+        context.Log.Error(ex.ToString());
+    }
+});
+```
+
+For app-wide error handling, use standard ASP.NET Core exception-handling middleware — failures during activity processing surface as a `BotHandlerException` that wraps the original exception and the offending activity.
+
+---
+
+### PAGE: Trust Model
+
+# Trust Model
+
+The Teams SDK enforces a layered authentication model. Inbound JSON Web Tokens are validated once, at the HTTP boundary, before any handler in your application sees them. Everything downstream — your activity handlers, the parsed token accessor on the context, and any custom routes that opt into the same policy — operates on tokens that have already passed signature, issuer, audience, and expiry checks.
+
+This page describes where validation happens, what you can trust afterwards, and how to extend the model when you add your own protected surfaces.
+
+## What the SDK validates automatically
+
+For every inbound request on `/api/messages`, the SDK validates the bearer token before invoking any activity handler. Validation includes:
+
+- **Signature verification** against the authoritative JSON Web Key Set (JWKS). The signing keys are discovered from the OpenID Configuration endpoint for the configured cloud environment, so key rotation requires no action from you.
+- **Issuer check** against the set of expected issuers for your cloud (commercial, US Government, DoD, or China).
+- **Audience check** against your bot's application identifier.
+- **Caller application check** for Entra Agent ID tokens: the caller claim (`azp`, or `appid` when `azp` is absent) must identify the Agent 365 platform application.
+- **Lifetime check** with default clock skew tolerance.
+- **Signing algorithm check** — only `RS256` is accepted.
+
+Requests that fail any of these checks are rejected with HTTP 401 before reaching your code. If your application observes an inbound activity at all, the underlying token has been verified.
+
+## What you can rely on downstream
+
+Once the request is past the validator, the SDK exposes selected token claims through typed accessors on the activity context. The accessor classes (`JsonWebToken` in each SDK) are payload views over an already-validated token — they perform no validation of their own. You can read fields like the tenant ID, application ID, service URL, and expiration directly without re-checking the token.
+
+The same pattern applies to tokens the SDK acquires on your behalf — for example, when MSAL returns an access token for an outbound API call, or when an OAuth user-token exchange completes. Those tokens originate from Microsoft identity infrastructure and are wrapped in the same accessor type so your code reads them with a consistent API.
+
+## Adding custom authentication to your own surfaces
+
+If your bot exposes additional HTTP surfaces beyond the default Teams activity endpoint — for example a callback endpoint for an external system, a webhook handler, or any custom route you register — you are responsible for authenticating those requests yourself.
+
+The SDK's HTTP adapter is a thin layer over a standard web framework, so you attach your own auth middleware using that framework's conventions. The pattern is the same in all three SDKs: short-circuit the request with HTTP 401 when the credential check fails, otherwise call the next handler.
+
+```csharp
+// ASP.NET middleware: gate a custom route with a shared secret.
+app.Use(async (ctx, next) =>
+{
+    var secret = Environment.GetEnvironmentVariable("WEBHOOK_SECRET") ?? string.Empty;
+    var expected = "Bearer " + secret;
+    if (ctx.Request.Path.StartsWithSegments("/webhooks/external") &&
+        ctx.Request.Headers.Authorization != expected)
+    {
+        ctx.Response.StatusCode = 401;
+        return;
+    }
+    await next();
+});
+```
+
+If the route needs the same trust posture as `/api/messages` — Microsoft-issued bearer tokens rather than a shared secret — reuse the SDK's built-in validator instead. See the [App Authentication](#app-authentication) guide for how to compose validators.
+
+## What not to do
+
+The accessor types described above are not safe to construct against arbitrary input. They expose claims from a parsed token; they do not check whether the token was signed by a party you trust.
+
+Do not:
+
+- Read a token from an untrusted HTTP request and construct a `JsonWebToken` from it as a basis for any authorization decision.
+- Pass user-supplied tokens directly to downstream services without first running them through the SDK's validator (or your own equivalent).
+- Disable the SDK's automatic validation on `/api/messages`. The default-deny posture relies on it.
+
+If you need to validate a token outside the activity pipeline, use the validator components directly rather than the accessor. Each SDK exposes a token validator that performs the full signature-verification flow against the same JWKS endpoint the activity pipeline uses.
+
+---
+
+### PAGE: Sending Messages
+
+# Sending Messages
+
+Sending messages is a core part of an agent's functionality. With all activity handlers, a `send` method is provided which allows your handlers to send a message back to the user to the relevant conversation.
+
+:::info[SDK 2.1]
+In SDK 2.1, the per-turn `context.Send`, `context.Reply`, and `context.Quote` helpers work the same way. The main difference is **streaming** — see the tabbed examples below.
+:::
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async (context, cancellationToken) =>
+{
+    await context.Send($"you said: {context.Activity.Text}", cancellationToken);
+});
+```
+
+**SDK 2.1+:**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    await context.SendAsync($"you said: {context.Activity.Text}", cancellationToken);
+});
+```
+
+In the above example, the handler gets a `message` activity, and uses the `send` method to send a reply to the user.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnVerifyState(async (context, cancellationToken) =>
+{
+    await context.Send("You have successfully signed in!", cancellationToken);
+});
+```
+
+You are not restricted to only replying to `message` activities. In the above example, the handler is listening to `OnVerifyState` events, which are sent when a user successfully signs in.
+
+**SDK 2.1+:**
+
+```csharp
+var flow = teams.GetOAuthFlow("graph");
+flow.OnSignInComplete(async (context, tokenResponse, cancellationToken) =>
+{
+    await context.SendAsync("You have successfully signed in!", cancellationToken);
+});
+```
+You are not restricted to only replying to `message` activities. In the above example, the handler is listening to `OnSignInComplete` events, which are sent when a user successfully signs in.
+
+:::tip
+This shows an example of sending a text message. Additionally, you are able to send back things like [adaptive cards](#adaptive-cards) by using the same `send` method. Look at the [adaptive card](#adaptive-cards) section for more details.
+:::
+
+## Streaming
+
+You may also stream messages to the user which can be useful for long messages, or AI generated messages. The SDK makes this simple for you by providing a `stream` function which you can use to send messages in chunks.
+
+Streaming changes how the response arrives, not how fast your agent produces it. Text appears incrementally as it is generated, so the user sees progress rather than a blank screen, and you can show a thinking or status indicator before any real output exists. A streamed response is also stoppable: when the user stops it, the SDK surfaces the cancellation to your handler so you can abandon the remaining work. The gain is in perceived time to first output, which is why streaming suits long or model generated replies and adds little to a short one you could simply send.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async (context, cancellationToken) =>
+{
+    context.Stream.Emit("hello");
+    context.Stream.Emit(", ");
+    context.Stream.Emit("world!");
+    // result message: "hello, world!"
+    return Task.CompletedTask;
+});
+```
+
+**SDK 2.1+:**
+
+The 2.1 streams through a `TeamsStreamingWriter`. Create one from the turn context, push informative updates and response chunks, then finalize:
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    TeamsStreamingWriter writer = TeamsStreamingWriter.CreateFromContext(context);
+
+    await writer.SendInformativeUpdateAsync("Thinking…", cancellationToken);
+
+    await writer.AppendResponseAsync("hello", cancellationToken);
+    await writer.AppendResponseAsync(", ", cancellationToken);
+    await writer.AppendResponseAsync("world!", cancellationToken);
+
+    // flush the accumulated text as the final message: "hello, world!"
+    await writer.FinalizeResponseAsync(cancellationToken: cancellationToken);
+});
+```
+
+:::note
+Streaming is currently only supported in 1:1 conversations, not group chats or channels. Teams also supports only one concurrent streaming response per chat at a time.
+
+Every inbound activity gets its own stream, and the SDK closes that stream at the end of the turn. It does not serialize turns, though, and handlers can run concurrently, so a second activity can arrive while the first is still streaming. Streaming therefore brings message handling concurrency concerns that do not exist when you just send a reply, and resolving them may be implemented in your custom code by serializing turns per conversation or by finalizing the in-flight stream before starting the next one.
+:::
+
+![Animated image showing agent response text incrementally appearing in the chat window.](/screenshots/streaming-chat.gif)
+
+### Informative updates and stopping a stream
+
+An informative update shows a status line such as "Thinking..." while the agent works, before any response text exists.
+
+`writer.SendInformativeUpdateAsync()` sends an informative update.
+It throws `InvalidOperationException` once the first response chunk has been sent.
+The SDK learns that the user stopped the stream from the answer to a chunk it sends.
+From then on `writer.Cancelled` is true, and `AppendResponseAsync()`, `SendInformativeUpdateAsync()` and `FinalizeResponseAsync()` return without sending.
+`FinalizeResponseAsync()` also accepts a final activity that carries only attachments, and sends it as a new message when no streamed message exists.
+
+### Chunk pacing and retries
+
+You do not need to throttle your own chunks. Rapid `writer.AppendResponseAsync()` calls are coalesced and spaced roughly 500 milliseconds apart, so a token-by-token loop becomes a couple of network calls per second rather than one call per token. Every streamed chunk carries the full text accumulated so far rather than just the newest delta, so collapsing several chunks into one send never loses content. Wrapping your own throttle or sleep around each chunk mostly slows the response down, since it would be pacing a path that is already paced.
+
+This describes the SDK 2.1 `TeamsStreamingWriter`.
+
+`writer.AppendResponseAsync()` sends inline rather than queueing: it is awaited, and it makes the HTTP call itself. Every call appends your chunk to the accumulated buffer, but if less than 500ms has passed since the last chunk went out it returns without sending, and that gate is what keeps a fast loop from flooding the streaming API.
+
+Because the gate has no trailing timer, a burst that ends inside that 500ms window leaves its final delta buffered but not yet on screen. It goes out with the next `AppendResponseAsync()` that clears the gate, or with `FinalizeResponseAsync()`, so no text is lost, though the tail of a short response can appear only once the stream finalizes.
+
+`TeamsStreamingWriter` does not retry. Each chunk is a single attempt, so a transient failure is not retried for you. A timed out or cancelled stream is handled internally, and any other streaming error is thrown to your handler.
+
+None of this extends the [two minute window](#the-two-minute-streaming-limit), which runs on wall clock from the first chunk. Pacing keeps a stream under the streaming API's rate limit, but does not buy more time. It also applies only to the streaming path: the plain activity updates go out exactly when they are sent, so that cadence stays yours to manage.
+
+### The two minute streaming limit
+
+Teams keeps a message stream open for two minutes, measured from its first chunk. After that the service rejects further chunks for that message with a `403` and the [error code](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/streaming-ux#error-codes) `ContentStreamNotAllowed` (`Content stream finished due to exceeded streaming time.`).
+
+However, hitting the limit does not mean the response is lost. The SDK marks the stream as timed out and stops pushing chunks, but it keeps buffering everything your agent produces, and `writer.FinalizeResponseAsync()` finalizes by updating the original message in place with the full buffered text. 
+
+:::warning
+The two minute clock starts on the **first streamed chunk**, and an informative update (`writer.SendInformativeUpdateAsync()`) is a chunk. An agent that posts a status update immediately and then thinks for three minutes has spent its entire window before emitting a single token. When the slow work happens before you have any output, do that work first and open the stream once real content starts.
+:::
+
+### Running longer than two minutes
+
+To outlast the window, hand off before it closes: stream normally, then finalize the stream and continue the response growing with plain activity updates. No streaming window applies to plain updates, so the answer can keep arriving for as long as your agent runs.
+
+This pattern uses the SDK 2.1 `TeamsStreamingWriter`. There is no SDK 2.0 (Legacy) variant on this page.
+
+`FinalizeResponseAsync` does not return the finalized message, so the id of the streamed message is not available to the caller. The continuation is therefore sent as one follow-up message, which is then edited in place for the rest of the run. That follow-up carries only the text produced after the handoff, because the streamed message already published everything before it, so the two messages read in sequence.
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    TeamsStreamingWriter writer = TeamsStreamingWriter.CreateFromContext(context);
+    string conversationId = context.Activity.Conversation.Id;
+
+    StringBuilder continuation = new();
+    DateTimeOffset? opened = null;
+    bool handedOff = false;
+    string? messageId = null;
+    DateTimeOffset lastEdit = DateTimeOffset.MinValue;
+
+    await foreach (string chunk in RunAgentAsync(context.Activity.Text, cancellationToken))
+    {
+        // Phase 1: real streaming. The window opens on the first streamed chunk,
+        // not when the handler starts, so the clock starts here.
+        if (!handedOff && (opened is null || DateTimeOffset.UtcNow - opened < TimeSpan.FromSeconds(110)))
+        {
+            opened ??= DateTimeOffset.UtcNow;
+            await writer.AppendResponseAsync(chunk, cancellationToken);
+            continue;
+        }
+
+        // This chunk was never streamed, so it belongs to the continuation.
+        continuation.Append(chunk);
+
+        // Hand off once: finalize the streamed message, then open the follow-up that carries the rest.
+        if (!handedOff)
+        {
+            await writer.FinalizeResponseAsync(cancellationToken: cancellationToken);
+            handedOff = true;
+
+            SendActivityResponse? sent = await context.SendAsync(
+                new MessageActivityInput().WithText(continuation.ToString()), cancellationToken);
+
+            messageId = sent?.Id;
+            lastEdit = DateTimeOffset.UtcNow;
+            continue;
+        }
+
+        // Phase 2: plain edits on the follow-up. No two minute ceiling.
+        if (messageId is not null && DateTimeOffset.UtcNow - lastEdit > TimeSpan.FromSeconds(3))
+        {
+            await context.Api.Conversations.UpdateActivityAsync(
+                conversationId,
+                messageId,
+                new MessageActivityInput().WithText(continuation.ToString()),
+                cancellationToken: cancellationToken);
+
+            lastEdit = DateTimeOffset.UtcNow;
+        }
+    }
+
+    if (!handedOff)
+    {
+        await writer.FinalizeResponseAsync(cancellationToken: cancellationToken);
+    }
+    else if (messageId is not null)
+    {
+        await context.Api.Conversations.UpdateActivityAsync(
+            conversationId,
+            messageId,
+            new MessageActivityInput().WithText(continuation.ToString()),
+            cancellationToken: cancellationToken);
+    }
+});
+```
+
+`handedOff` decides whether the stream still needs finalizing, which is why it is tracked separately from `messageId`. The follow-up is sent exactly once, in the same iteration that sets `handedOff`, so a missing id cannot cause a second send. It does mean the continuation stops updating at that point: `SendAsync` returns `SendActivityResponse?` with a nullable `Id`, and if no id comes back there is no way to edit that message, nor does the SDK expose the finalized streamed message's id as a fallback.
+
+`context.SendAsync` always creates a new activity, even when the activity carries an id, so plain edits go through `context.Api.Conversations.UpdateActivityAsync`. Use `writer.TimedOut` to check whether the stream tripped the limit before you handed off.
+
+Plain updates are subject to ordinary activity throttling rather than the streaming path's allowance, so pace them at a cadence measured in seconds rather than sending one per token.
+
+### Starting another streamed message
+
+Calling `writer.AppendResponseAsync()` again after the stream has been closed posts a second, separate message in the conversation by reusing the SDK object in your custom handler; it clears its buffered state and starts the new message. The second message gets its own stream id, so it also gets its own fresh two minute window. The message already finalized stays finalized and is not reopened or extended. Use this when your agent has a genuinely separate second answer to stream, not as a way to give one response more time.
+
+### Streaming in threads
+
+The first message of a stream is placed the same way as a response sent with `SendAsync()`.
+See [Reactive Threading](#reactive-threading-within-a-handler) for the rules.
+In a 1:1 chat the stream starts in the thread when the inbound message is inside a thread, and at the top level otherwise.
+The SDK applies the same rules in channels: a channel stream starts in the thread of the inbound message.
+Without `channelData.replyChain.id` on the inbound activity, the stream is not placed in a reply chain.
+Teams itself supports streaming only in 1:1 chats, as noted above.
+
+Only the first chunk of each streamed message uses the reply chain route.
+The later chunks are sent to the inbound conversation with the stream id of the first message.
+In a 1:1 chat inside a thread, the stre

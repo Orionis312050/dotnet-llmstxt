@@ -1,18 +1,25 @@
 # dotnet-llmstxt
 
-Édition **offline et auto-contenue** du [llms_csharp_full.txt du Teams SDK .NET](https://microsoft.github.io/teams-sdk/llms_docs/llms_csharp_full.txt), pensée pour les environnements fermés (knowledge base d'IA ne pouvant pas fetcher de liens externes).
+Édition **offline** de la doc C# (.NET) du Teams SDK, à partir de https://microsoft.github.io/teams-sdk/llms_docs/llms_csharp.txt (+ contenu complet de `llms_csharp_full.txt`).
 
-## Contenu
+## Structure
 
-- `llms.txt` (~80 Ko) : reprend le contenu complet de `llms_csharp_full.txt` (21 pages de la doc Teams SDK C#). **Chaque lien interne vers une autre page de la doc a été remplacé par une ancre in-file (`#section`)** pointant vers la section correspondante du fichier — aucun fetch externe requis.
-- Les liens vraiment externes (learn.microsoft.com, github.com, images, références CLI) sont conservés tels quels.
+- `llms.txt` : index de toutes les pages (liens relatifs vers `docs/`).
+- `docs/<categorie>/<feature>.md` : **une feature par fichier**, contenu complet inline.
+- Chaque dossier de catégorie contient un `_category_.json` (compatible Docusaurus).
+- Tous les cross-references sont des liens relatifs intra-dépôt : aucun fetch externe requis.
+- `script/compilers.sh` : recompile `docs/` + l'index depuis le llms.txt complet offline.
+- `script/llms.txt.part-*` : le llms.txt **complet** (liens déjà inline, ancres `#section`), poussé en parties ; `script/compilers.sh` le réassemble automatiquement en `script/llms.txt`.
+
+## Utilisation (environnement fermé)
+
+```bash
+git clone <ce dépôt> && cd dotnet-llmstxt
+bash script/compilers.sh            # réassemble script/llms.txt puis compile docs/ + index llms.txt
+bash script/compilers.sh --reassemble   # réassemble uniquement script/llms.txt
+bash script/compilers.sh --from-docs    # reconstruit script/llms.txt depuis docs/
+```
 
 ## Source
 
-Contenu issu du dépôt officiel [`microsoft/teams-sdk`](https://github.com/microsoft/teams-sdk) (`teams.md/docs/main`, branche `main`), traité avec la même logique que le générateur officiel `teams.md/scripts/generate-llms-txt.ts` (filtrage frontmatter `llms: ignore`, nettoyage MDX, flattening des onglets).
-
-## Utilisation
-
-```
-https://raw.githubusercontent.com/Orionis312050/dotnet-llmstxt/main/llms.txt
-```
+Généré depuis `microsoft/teams-sdk` (`teams.md/src/pages/templates` + fragments `csharp.incl.md`, et `teams.md/docs/main`), même pipeline que `generate-llms-txt.ts`.

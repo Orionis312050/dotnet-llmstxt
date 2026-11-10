@@ -1,0 +1,897 @@
+onSet`:
+
+```csharp
+using Microsoft.Teams.Cards;
+
+var card = new AdaptiveCard
+{
+    Schema = "http://adaptivecards.io/schemas/adaptive-card.json",
+    Actions = new List
+    {
+        new ExecuteAction
+        {
+            Title = "Submit Feedback",
+            Data = new Union<string, SubmitActionData>(new SubmitActionData
+            {
+                NonSchemaProperties = new Dictionary<string, object?>
+                {
+                    { "action", "submit_feedback" }
+                }
+            })
+        },
+        new OpenUrlAction("https://adaptivecards.microsoft.com")
+        {
+            Title = "Learn More"
+        }
+    }
+};
+```
+
+### Raw JSON Alternative
+
+Just like when building cards, if you prefer to work with raw JSON, you can do just that. 
+
+```csharp
+var actionJson = """
+{
+  "type": "Action.OpenUrl",
+  "url": "https://adaptivecards.microsoft.com",
+  "title": "Learn More"
+}
+""";
+var action = OpenUrlAction.Deserialize(actionJson);
+```
+
+## Working with Input Values
+
+### Associating data with the cards
+
+Sometimes you want to send a card and have it be associated with some data. Set the `data` value to be sent back to the client so you can associate it with a particular entity.
+
+```csharp
+private static AdaptiveCard CreateProfileCard()
+{
+    return new AdaptiveCard
+    {
+        Schema = "http://adaptivecards.io/schemas/adaptive-card.json",
+        Body = new List
+        {
+            new TextBlock("User Profile")
+            {
+                Weight = TextWeight.Bolder,
+                Size = TextSize.Large
+            },
+            new TextInput
+            {
+                Id = "name",
+                Label = "Name",
+                Value = "John Doe"
+            },
+            new TextInput
+            {
+                Id = "email",
+                Label = "Email",
+                Value = "john@contoso.com"
+            },
+            new ToggleInput("Subscribe to newsletter")
+            {
+                Id = "subscribe",
+                Value = "false"
+            }
+        },
+        Actions = new List
+        {
+            new ExecuteAction
+            {
+                Title = "Save",
+                // entity_id will come back after the user submits
+                Data = new Union<string, SubmitActionData>(new SubmitActionData
+                {
+                    NonSchemaProperties = new Dictionary<string, object?>
+                    {
+                        { "action", "save_profile" },
+                        { "entity_id", "12345" }
+                    }
+                }),
+                AssociatedInputs = AssociatedInputs.Auto
+            }
+        }
+    };
+}
+
+// Data received in handler (conceptual structure)
+/*
+{
+  "action": "save_profile",
+  "entity_id": "12345",     // From action data
+  "name": "John Doe",       // From name input
+  "email": "john@doe.com",  // From email input
+  "subscribe": "true"       // From toggle input (as string)
+}
+
+Accessed in C# as:
+- data["action"] → "save_profile"
+- data["entity_id"] → "12345"
+- data["name"] → "John Doe"
+- data["email"] → "john@doe.com"
+- data["subscribe"] → "true"
+*/
+```
+
+### Input Validation
+
+Input Controls provide ways for you to validate. More details can be found on the Adaptive Cards [documentation](https://adaptivecards.microsoft.com/?topic=input-validation).
+
+```csharp
+private static AdaptiveCard CreateProfileCardWithValidation()
+{
+    return new AdaptiveCard
+    {
+        Schema = "http://adaptivecards.io/schemas/adaptive-card.json",
+        Body = new List
+        {
+            new TextBlock("Profile with Validation")
+            {
+                Weight = TextWeight.Bolder,
+                Size = TextSize.Large
+            },
+            new NumberInput
+            {
+                Id = "age",
+                Label = "Age",
+                IsRequired = true,
+                Min = 0,
+                Max = 120
+            },
+            // Can configure custom error messages
+            new TextInput
+            {
+                Id = "name",
+                Label = "Name",
+                IsRequired = true,
+                ErrorMessage = "Name is required"
+            },
+            new TextInput
+            {
+                Id = "location",
+                Label = "Location"
+            }
+        },
+        Actions = new List
+        {
+            new ExecuteAction
+            {
+                Title = "Save",
+                // All inputs should be validated
+                Data = new Union<string, SubmitActionData>(new SubmitActionData
+                {
+                    NonSchemaProperties = new Dictionary<string, object?>
+                    {
+                        { "action", "save_profile" }
+                    }
+                }),
+                AssociatedInputs = AssociatedInputs.Auto
+            }
+        }
+    };
+}
+```
+
+## Server Handlers
+
+### Basic Structure
+
+Card actions arrive as `card.action` activities in your app. These give you access to the validated input values plus any `data` values you had configured to be sent back to you.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+    using System.Text.Json;
+    using Microsoft.Teams.Api.AdaptiveCards;
+    using Microsoft.Teams.Apps.Annotations;
+
+    [TeamsController]
+    public class AdaptiveCardController
+    {
+        [AdaptiveCard.Action]
+        public async Task OnAction([Context] IContext context, CancellationToken cancellationToken)
+        {
+            var data = context.Activity.Value?.Action?.Data;
+
+            if (data == null)
+                return new ActionResponse.Message("No data specified") { StatusCode = 400 };
+
+            string? action = data.TryGetValue("action", out var actionObj) ? actionObj?.ToString() : null;
+
+            if (string.IsNullOrEmpty(action))
+                return new ActionResponse.Message("No action specified") { StatusCode = 400 };
+
+            string? GetFormValue(string key)
+            {
+                if (data.TryGetValue(key, out var val))
+                {
+                    if (val is JsonElement element)
+                        return element.GetString();
+                    return val?.ToString();
+                }
+                return null;
+            }
+
+            switch (action)
+            {
+                case "submit_basic":
+                    var notifyValue = GetFormValue("notify") ?? "false";
+                    await context.Client.Send($"Basic card submitted! Notify setting: {notifyValue}");
+                    break;
+
+                case "submit_feedback":
+                    var feedbackText = GetFormValue("feedback") ?? "No feedback provided";
+                    await context.Client.Send($"Feedback received: {feedbackText}");
+                    break;
+
+                case "create_task":
+                    var title = GetFormValue("title") ?? "Untitled";
+                    var priority = GetFormValue("priority") ?? "medium";
+                    var dueDate = GetFormValue("due_date") ?? "No date";
+                    await context.Client.Send($"Task created!\nTitle: {title}\nPriority: {priority}\nDue: {dueDate}");
+                    break;
+
+                case "save_profile":
+                    var name = GetFormValue("name") ?? "Unknown";
+                    var email = GetFormValue("email") ?? "No email";
+                    var subscribe = GetFormValue("subscribe") ?? "false";
+                    var age = GetFormValue("age");
+                    var location = GetFormValue("location") ?? "Not specified";
+
+                    var response = $"Profile saved!\nName: {name}\nEmail: {email}\nSubscribed: {subscribe}";
+                    if (!string.IsNullOrEmpty(age))
+                        response += $"\nAge: {age}";
+                    if (location != "Not specified")
+                        response += $"\nLocation: {location}";
+
+                    await context.Client.Send(response);
+                    break;
+
+                case "test_json":
+                    await context.Client.Send("JSON deserialization test successful!");
+                    break;
+
+                default:
+                    return new ActionResponse.Message("Unknown action") { StatusCode = 400 };
+            }
+
+            return new ActionResponse.Message("Action processed successfully");
+        }
+    }
+    ```
+
+**SDK 2.1 (current):**
+
+```csharp
+    using System.Text.Json;
+    using Microsoft.Teams.Apps;
+
+    bot.OnAdaptiveCardAction(async (context, cancellationToken) =>
+    {
+        var data = context.Activity.Value?.Action?.Data;
+
+        if (data == null)
+            return AdaptiveCardResponse.CreateMessageResponse("No data specified", 400);
+
+        string? action = data.TryGetValue("action", out var actionObj) ? actionObj?.ToString() : null;
+
+        if (string.IsNullOrEmpty(action))
+            return AdaptiveCardResponse.CreateMessageResponse("No action specified", 400);
+
+        string? GetFormValue(string key)
+        {
+            if (data.TryGetValue(key, out var val))
+            {
+                if (val is JsonElement element)
+                    return element.GetString();
+                return val?.ToString();
+            }
+            return null;
+        }
+
+        switch (action)
+        {
+            case "submit_basic":
+                var notifyValue = GetFormValue("notify") ?? "false";
+                await context.SendAsync($"Basic card submitted! Notify setting: {notifyValue}", cancellationToken);
+                break;
+
+            case "submit_feedback":
+                var feedbackText = GetFormValue("feedback") ?? "No feedback provided";
+                await context.SendAsync($"Feedback received: {feedbackText}", cancellationToken);
+                break;
+
+            case "create_task":
+                var title = GetFormValue("title") ?? "Untitled";
+                var priority = GetFormValue("priority") ?? "medium";
+                var dueDate = GetFormValue("due_date") ?? "No date";
+                await context.SendAsync($"Task created!\nTitle: {title}\nPriority: {priority}\nDue: {dueDate}", cancellationToken);
+                break;
+
+            case "save_profile":
+                var name = GetFormValue("name") ?? "Unknown";
+                var email = GetFormValue("email") ?? "No email";
+                var subscribe = GetFormValue("subscribe") ?? "false";
+                var age = GetFormValue("age");
+                var location = GetFormValue("location") ?? "Not specified";
+
+                var response = $"Profile saved!\nName: {name}\nEmail: {email}\nSubscribed: {subscribe}";
+                if (!string.IsNullOrEmpty(age))
+                    response += $"\nAge: {age}";
+                if (location != "Not specified")
+                    response += $"\nLocation: {location}";
+
+                await context.SendAsync(response, cancellationToken);
+                break;
+
+            case "test_json":
+                await context.SendAsync("JSON deserialization test successful!", cancellationToken);
+                break;
+
+            default:
+                return AdaptiveCardResponse.CreateMessageResponse("Unknown action", 400);
+        }
+
+        return AdaptiveCardResponse.CreateMessageResponse("Action processed successfully");
+    });
+    ```
+
+:::note
+The `data` values come from JSON and need to be extracted using the helper method shown above to handle different JSON element types.
+:::
+
+## Responding from a card action
+
+A message sent from a card action handler is placed relative to the card that was clicked.
+In a 1:1 chat, when the card is inside a thread, `context.SendAsync()` sends the message into that thread, and when the card is at the top level it sends the message at the top level.
+This applies to `Action.Execute` and `Action.Submit`.
+In a channel, the response to a card button that arrives as a `message` (`Action.Submit`) is sent through the thread's reply chain, and the SDK sends the response to any other card action to the inbound conversation.
+See [Responding to edits, reactions and card actions](#sending-messages) for the rules.
+
+## Dynamic Typeahead Search
+
+An `Input.ChoiceSet` can fetch its choices dynamically as the user types, instead of listing them statically. Leave `choices` as an empty array and add a `choices.data` `Data.Query` that names a `dataset`. As the user types, Teams sends your bot an `application/search` invoke, and you return the matching results.
+
+```csharp
+using Microsoft.Teams.Cards;
+
+private static AdaptiveCard CreateDynamicSearchCard()
+{
+    return new AdaptiveCard
+    {
+        Schema = "http://adaptivecards.io/schemas/adaptive-card.json",
+        Body = new List
+        {
+            new ChoiceSetInput
+            {
+                Id = "game",
+                Label = "Game",
+                Placeholder = "Search for a game",
+                Style = ChoiceSetInputStyle.Filtered,
+                Choices = new List()
+            }.WithChoicesData(new QueryData { Dataset = "nintendoGames" })
+        },
+        Actions = new List
+        {
+            new ExecuteAction
+            {
+                Title = "Submit",
+                Data = new Union<string, SubmitActionData>(new SubmitActionData
+                {
+                    NonSchemaProperties = new Dictionary<string, object?>
+                    {
+                        { "action", "submit_game" }
+                    }
+                })
+            }
+        }
+    };
+}
+```
+
+Register a handler for the `application/search` invoke to return results as ` title, value ` pairs, where `title` is the display text and `value` is what gets submitted when the choice is selected:
+
+**SDK 2.0 (Legacy):**
+
+:::note
+    Dynamic typeahead search for Adaptive Cards is not supported in SDK 2.0. Use SDK 2.1 for this feature.
+    :::
+
+**SDK 2.1 (current):**
+
+```csharp
+    using Microsoft.Teams.Apps;
+    using Microsoft.Teams.Apps.Handlers;
+
+    var games = new[] { "Super Mario Odyssey", "Metroid Dread", "Splatoon 3" };
+
+    bot.OnSearch((context, cancellationToken) =>
+    {
+        var query = context.Activity.Value?.QueryText?.ToLowerInvariant() ?? "";
+        var results = games
+            .Where(g => g.ToLowerInvariant().Contains(query))
+            .Select(g => new SearchResult { Title = g, Value = g })
+            .ToList();
+
+        var response = new SearchResponse
+        {
+            Value = new SearchResponseValue { Results = results }
+        };
+
+        return Task.FromResult(new InvokeResponse(200, response));
+    });
+    ```
+
+The activity value also carries the query options (`skip`/`top` for paging) and the originating `dataset`, so a single handler can branch on the dataset when several `Input.ChoiceSet` inputs share it.
+
+---
+
+### PAGE: Handling Dialog Submissions
+
+# Handling Dialog Submissions
+
+Dialogs have a specific `TaskSubmit` event to handle submissions. When a user submits a form inside a dialog, the app is notified via this event, which is then handled to process the submission values, and can either send a response or proceed to more steps in the dialogs (see [Multi-step Dialogs](#handling-multi-step-forms)).
+
+:::warning Return Type Requirement
+Methods decorated with `[TaskSubmit]` **must** return `Task`. Every code path must return a Response object containing either a `MessageTask` (to show a message and close the dialog) or a `ContinueTask` (to show another dialog). Using just `Task` or `void` will compile but fail at runtime when the Teams client expects a Response object.
+:::
+
+## Basic Example
+
+In this example, we show how to handle dialog submissions from an Adaptive Card form:
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Api.TaskModules;
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Activities.Invokes;
+using Microsoft.Teams.Apps.Annotations;
+using Microsoft.Teams.Common.Logging;
+
+//...
+
+[TaskSubmit]
+public async Task OnTaskSubmit([Context] Tasks.SubmitActivity activity, [Context] IContext.Client client, [Context] ILogger log)
+{
+    var data = activity.Value?.Data as JsonElement?;
+    if (data == null)
+    {
+        log.Info("[TASK_SUBMIT] No data found in the activity value");
+        return new Microsoft.Teams.Api.TaskModules.Response(
+            new Microsoft.Teams.Api.TaskModules.MessageTask("No data found in the activity value"));
+    }
+
+    var submissionType = data.Value.TryGetProperty("submissiondialogtype", out var submissionTypeObj) && submissionTypeObj.ValueKind == JsonValueKind.String
+        ? submissionTypeObj.ToString()
+        : null;
+
+    string? GetFormValue(string key)
+    {
+        if (data.Value.TryGetProperty(key, out var val))
+        {
+            if (val is JsonElement element)
+                return element.GetString();
+            return val.ToString();
+        }
+        return null;
+    }
+
+    switch (submissionType)
+    {
+        case "simple_form":
+            var name = GetFormValue("name") ?? "Unknown";
+            await client.Send($"Hi {name}, thanks for submitting the form!");
+            return new Microsoft.Teams.Api.TaskModules.Response(
+                new Microsoft.Teams.Api.TaskModules.MessageTask("Form was submitted"));
+        // More examples below
+        default:
+            return new Microsoft.Teams.Api.TaskModules.Response(
+                new Microsoft.Teams.Api.TaskModules.MessageTask("Unknown submission type"));
+    }
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Apps.TaskModules;
+
+//...
+
+teams.OnTaskSubmit(async (context, cancellationToken) =>
+{
+    var data = context.Activity.Value?.Data as JsonElement?;
+    if (data == null)
+    {
+        return TaskModuleResponse.CreateBuilder()
+            .WithType(TaskModuleResponseTypes.Message)
+            .WithMessage("No data found in the activity value")
+            .Build();
+    }
+
+    var submissionType = data.Value.TryGetProperty("submissiondialogtype", out var submissionTypeObj) && submissionTypeObj.ValueKind == JsonValueKind.String
+        ? submissionTypeObj.ToString()
+        : null;
+
+    string? GetFormValue(string key)
+    {
+        if (data.Value.TryGetProperty(key, out var val))
+        {
+            if (val is JsonElement element)
+                return element.GetString();
+            return val.ToString();
+        }
+        return null;
+    }
+
+    switch (submissionType)
+    {
+        case "simple_form":
+            var name = GetFormValue("name") ?? "Unknown";
+            await context.SendAsync($"Hi {name}, thanks for submitting the form!", cancellationToken);
+            return TaskModuleResponse.CreateBuilder()
+                .WithType(TaskModuleResponseTypes.Message)
+                .WithMessage("Form was submitted")
+                .Build();
+        // More examples below
+        default:
+            return TaskModuleResponse.CreateBuilder()
+                .WithType(TaskModuleResponseTypes.Message)
+                .WithMessage("Unknown submission type")
+                .Build();
+    }
+});
+```
+
+Similarly, handling dialog submissions from rendered webpages is also possible:
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+// Add this case to the switch statement in OnTaskSubmit method
+case "webpage_dialog":
+    var webName = GetFormValue("name") ?? "Unknown";
+    var email = GetFormValue("email") ?? "No email";
+    await client.Send($"Hi {webName}, thanks for submitting the form! We got that your email is {email}");
+    return new Microsoft.Teams.Api.TaskModules.Response(
+        new Microsoft.Teams.Api.TaskModules.MessageTask("Form submitted successfully"));
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+// Add this case to the switch statement in the OnTaskSubmit handler
+case "webpage_dialog":
+    var webName = GetFormValue("name") ?? "Unknown";
+    var email = GetFormValue("email") ?? "No email";
+    await context.SendAsync($"Hi {webName}, thanks for submitting the form! We got that your email is {email}", cancellationToken);
+    return TaskModuleResponse.CreateBuilder()
+        .WithType(TaskModuleResponseTypes.Message)
+        .WithMessage("Form submitted successfully")
+        .Build();
+```
+
+### Complete TaskSubmit Handler Example
+
+Here's the complete example showing how to handle multiple submission types:
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Api.TaskModules;
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Activities.Invokes;
+using Microsoft.Teams.Apps.Annotations;
+using Microsoft.Teams.Common.Logging;
+
+//...
+
+[TaskSubmit]
+public async Task OnTaskSubmit([Context] Tasks.SubmitActivity activity, [Context] IContext.Client client, [Context] ILogger log)
+{
+    var data = activity.Value?.Data as JsonElement?;
+    if (data == null)
+    {
+        log.Info("[TASK_SUBMIT] No data found in the activity value");
+        return new Microsoft.Teams.Api.TaskModules.Response(
+            new Microsoft.Teams.Api.TaskModules.MessageTask("No data found in the activity value"));
+    }
+
+    var submissionType = data.Value.TryGetProperty("submissiondialogtype", out var submissionTypeObj) && submissionTypeObj.ValueKind == JsonValueKind.String
+        ? submissionTypeObj.ToString()
+        : null;
+
+    string? GetFormValue(string key)
+    {
+        if (data.Value.TryGetProperty(key, out var val))
+        {
+            if (val is JsonElement element)
+                return element.GetString();
+            return val.ToString();
+        }
+        return null;
+    }
+
+    switch (submissionType)
+    {
+        case "simple_form":
+            var name = GetFormValue("name") ?? "Unknown";
+            await client.Send($"Hi {name}, thanks for submitting the form!");
+            return new Microsoft.Teams.Api.TaskModules.Response(
+                new Microsoft.Teams.Api.TaskModules.MessageTask("Form was submitted"));
+
+        case "webpage_dialog":
+            var webName = GetFormValue("name") ?? "Unknown";
+            var email = GetFormValue("email") ?? "No email";
+            await client.Send($"Hi {webName}, thanks for submitting the form! We got that your email is {email}");
+            return new Microsoft.Teams.Api.TaskModules.Response(
+                new Microsoft.Teams.Api.TaskModules.MessageTask("Form submitted successfully"));
+
+        default:
+            return new Microsoft.Teams.Api.TaskModules.Response(
+                new Microsoft.Teams.Api.TaskModules.MessageTask("Unknown submission type"));
+    }
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Apps.TaskModules;
+
+//...
+
+teams.OnTaskSubmit(async (context, cancellationToken) =>
+{
+    var data = context.Activity.Value?.Data as JsonElement?;
+    if (data == null)
+    {
+        return TaskModuleResponse.CreateBuilder()
+            .WithType(TaskModuleResponseTypes.Message)
+            .WithMessage("No data found in the activity value")
+            .Build();
+    }
+
+    var submissionType = data.Value.TryGetProperty("submissiondialogtype", out var submissionTypeObj) && submissionTypeObj.ValueKind == JsonValueKind.String
+        ? submissionTypeObj.ToString()
+        : null;
+
+    string? GetFormValue(string key)
+    {
+        if (data.Value.TryGetProperty(key, out var val))
+        {
+            if (val is JsonElement element)
+                return element.GetString();
+            return val.ToString();
+        }
+        return null;
+    }
+
+    switch (submissionType)
+    {
+        case "simple_form":
+            var name = GetFormValue("name") ?? "Unknown";
+            await context.SendAsync($"Hi {name}, thanks for submitting the form!", cancellationToken);
+            return TaskModuleResponse.CreateBuilder()
+                .WithType(TaskModuleResponseTypes.Message)
+                .WithMessage("Form was submitted")
+                .Build();
+
+        case "webpage_dialog":
+            var webName = GetFormValue("name") ?? "Unknown";
+            var email = GetFormValue("email") ?? "No email";
+            await context.SendAsync($"Hi {webName}, thanks for submitting the form! We got that your email is {email}", cancellationToken);
+            return TaskModuleResponse.CreateBuilder()
+                .WithType(TaskModuleResponseTypes.Message)
+                .WithMessage("Form submitted successfully")
+                .Build();
+
+        default:
+            return TaskModuleResponse.CreateBuilder()
+                .WithType(TaskModuleResponseTypes.Message)
+                .WithMessage("Unknown submission type")
+                .Build();
+    }
+});
+```
+
+A message sent from a submission handler is placed like a message sent from a card action.
+In a 1:1 chat it goes into the thread of the card whose button opened the dialog, when that card is inside a thread.
+See [Responding to edits, reactions and card actions](#sending-messages).
+
+---
+
+### PAGE: Receiving Files
+
+# Receiving Files
+
+Teams users can send files to agents by attaching them to chat messages. When users send files to an agent in 1:1 chat, or to an agentic user in a group chat or channel, they arrive as part of the context of the received message activity. `context.Files` provides lazy access to the metadata and bytes of each attached file.
+
+An attached file is not delivered inline with the message. Teams stores the file in OneDrive or SharePoint and hands your agent a small metadata attachment describing it, including a short-lived, pre-authorized URL in personal scopes for traditional bots, while agentic users must make a Graph call via the `contentUrl`. Reading the contents means fetching the bytes from either URL over the network, so the download itself is deferred until explicitly called.
+
+This API covers file downloads in **personal (1:1) chats** for every agent. Agentic users can also download files in **group chats** and **channels** starting in version 2.2.0; traditional bots don't receive files there. See [Conversation scope support](#conversation-scope-support).
+
+## Enable file support in your manifest for traditional bots
+
+Teams only offers users the option to attach a file in 1:1 with a bot when your app manifest opts in. Set `supportsFiles` to `true` on your bot entry; without it the compose box shows no attach affordance for your agent, no file reaches your handler, and `context.Files.ListAsync()` is always empty:
+
+```json
+"bots": [
+  {
+    "botId": "${{BOT_ID}}",
+    "scopes": ["personal"],
+    "supportsFiles": true
+  }
+]
+```
+
+## Enable file support on the blueprint for agentic users
+
+Agentic users need a Graph file permission consented on the agent's blueprint by an administrator in order to access files. See [inheritable permissions](https://learn.microsoft.com/entra/agent-id/concept-inheritable-permissions) for how an agent acquires those scopes.
+
+## Access attached files
+
+The accessor `context.Files` is available on every activity context, but only inbound message activities carry attachments, so it is empty everywhere else. Use `ListAsync()` to get all files on the current message, including pasted images, or `FirstAsync()` for the common single-file case. Both hand back the file's metadata rather than its contents, so listing is cheap even when the attached files are large:
+
+```csharp
+teamsApp.OnMessage(async (context, cancellationToken) =>
+{
+    IList attached = await context.Files.ListAsync(cancellationToken);
+
+    if (attached.Count == 0)
+    {
+        await context.ReplyAsync("Send me a file and I will read it.", cancellationToken);
+        return;
+    }
+
+    string names = string.Join(", ", attached.Select(f => f.Name));
+    await context.ReplyAsync($"You sent {attached.Count} file(s): {names}", cancellationToken);
+});
+```
+
+Listing with `ListAsync()` returns the files in the same order they arrived. It never throws: activities with no attachments (or non-message activities) return an empty list, and malformed file entries are skipped rather than failing the whole batch.
+
+```csharp
+IncomingFile? file = await context.Files.FirstAsync(cancellationToken);
+
+if (file is not null)
+{
+    await context.ReplyAsync($"Reading {file.Name}...", cancellationToken);
+}
+```
+
+Images the user pasted into the message are listed too, with `AttachmentStyle` set to `AttachmentStyle.InlineImage` (see [Receiving Inline Images](#receiving-inline-images)). Files sent as file attachments have the `AttachmentStyle.File` style. To list only one style, pass it as a filter to `ListAsync()` or `FirstAsync()`:
+
+```csharp
+// Only files sent as file attachments
+IList attachedFiles = await context.Files.ListAsync(
+    new FileListOptions { AttachmentStyle = AttachmentStyle.File },
+    cancellationToken);
+
+// Only images pasted into the message
+IList pastedImages = await context.Files.ListAsync(
+    new FileListOptions { AttachmentStyle = AttachmentStyle.InlineImage },
+    cancellationToken);
+```
+
+:::note
+Starting in 2.2.0, `ListAsync()` and `FirstAsync()` return pasted images when no filter is given. To keep the previous behavior of returning only file attachments, pass `AttachmentStyle.File` as the filter.
+:::
+
+### File metadata
+
+Each `IncomingFile` carries metadata describing the file, populated from what the platform reports:
+
+| Property | Description |
+|---|---|
+| `UniqueId` | The OneDrive/SharePoint drive-item id, when the platform provides it. Present only for files backed by ODSP storage. |
+| `Name` | File name including its extension (e.g. `report.pdf`). |
+| `Extension` | File extension without the dot (e.g. `pdf`), from the platform-supplied `fileType`. Absent when the platform omits it. |
+| `AttachmentStyle` | How the file was attached: `AttachmentStyle.File` when sent as a file attachment, or `AttachmentStyle.InlineImage` when pasted into the message. |
+| `ContentType` | The file's MIME type, when the source provides one. Always unset for file attachments received from a bot activity: the `file.download.info` attachment carries no MIME type, only the extension surfaced as `Extension`. To learn the type of the bytes you actually received, read `ContentType` on the downloaded file, which is resolved from the download response. For an inline image, see [Receiving Inline Images](#receiving-inline-images). |
+| `Scope` | The conversation scope the file arrived in (`personal`, `groupChat`, or `channel`). |
+| `Source` | Where the SDK found the file. Currently always `botActivity`. |
+| `ContentUrl` | A browsable link to the file in OneDrive/SharePoint, when known. Not a fetchable download URL. For an inline image, it is the image's Bot API location. |
+| `Raw` | The original wire attachment (the metadata object, not the bytes) — see [Access the raw attachment](#access-the-raw-attachment). |
+
+## Read a file
+
+The most common path is `DownloadAsync()`, which fetches the whole file and buffers it into an in-memory copy you own:
+
+```csharp
+IncomingFile? file = await context.Files.FirstAsync(
+    new FileListOptions { AttachmentStyle = AttachmentStyle.File },
+    cancellationToken);
+
+if (file is not null)
+{
+    DownloadedFile downloaded = await file.DownloadAsync(cancellationToken);
+
+    await context.ReplyAsync($"Downloaded {downloaded.Filename} ({downloaded.Bytes.Length} bytes, {downloaded.ContentType})", cancellationToken);
+}
+```
+
+For text files, `TextAsync()` is a shortcut for `DownloadAsync()` followed by decoding:
+
+```csharp
+IncomingFile? file = await context.Files.FirstAsync(
+    new FileListOptions { AttachmentStyle = AttachmentStyle.File },
+    cancellationToken);
+
+if (file is not null)
+{
+    string contents = await file.TextAsync(cancellationToken: cancellationToken);
+    await context.ReplyAsync($"The file starts with: {contents[..Math.Min(100, contents.Length)]}", cancellationToken);
+}
+```
+
+:::note
+Decoding with `TextAsync()` reads the downloaded bytes as UTF-8 by default, and is lossy: bytes that are not valid for the encoding become the replacement character (`U+FFFD`) instead of throwing. To decode a different encoding, pass an `Encoding` (e.g. `file.TextAsync(Encoding.Latin1)`). For binary files, read the raw bytes instead.
+:::
+
+To save a file to disk without holding it all in memory, use `SaveAsAsync()`, which streams straight to the path:
+
+```csharp
+await file.SaveAsAsync("./downloads/report.pdf", cancellationToken);
+```
+
+The path is resolved relative to the process working directory, overwrites an existing file, and does not create missing parent directories.
+
+:::warning
+A file's `Name` comes off the wire and is set by the uploader, so treat it as untrusted input rather than a destination. It may contain `/` or `\`, a drive or UNC prefix, or `..` segments, and no sanitization is performed on the developer's behalf. Therefore, no assumptions are made related to the destination like illegal characters based on operating system or naming collisions.
+:::
+
+For large files or streaming pipelines, `StreamAsync()` hands you the raw byte stream so you can process it as it arrives:
+
+```csharp
+await using Stream stream = await file.StreamAsync(cancellationToken);
+
+byte[] buffer = new byte[8192];
+int read;
+while ((read = await stream.ReadAsync(buffer, cancellationToken)) > 0)
+{
+    // process only the bytes read this iteration (e.g. pipe to a parser)
+    ReadOnlyMemory<byte> chunk = buffer.AsMemory(0, read);
+}
+```
+
+An `IncomingFile` handle holds no cached bytes: each call to `DownloadAsync()`, `TextAsync()`, `StreamAsync()`, or `SaveAsAsync()` fetches the file again. This matters because a file's download link is short-lived: the URL embeds its own pre-authorized `tempauth` credential, which can expire between reads. To read the same file several ways, call `DownloadAsync()` once and reuse the downloaded file it returns, which is a point-in-time copy whose readers never re-fetch:
+
+```csharp
+DownloadedFile downloaded = await file.DownloadAsync(cancellationToken);
+
+string text = downloaded.Text();                               // decode as UTF-8
+byte[] bytes = downloaded.Bytes;                               // the raw bytes
+await downloaded.SaveAsAsync("./copy.bin", cancellationToken); // write to disk, no re-fetch
+```
+
+| Property / method | Description |
+|---|---|
+| `Bytes` | The buffered file bytes as a `byte[]`. |
+| `ContentType` | MIME type resolved from the download response header, or the incoming file's metadata type if the response omits one. Falls back to `application/octet-stream` when neither provides a type, so this is never empty. |
+| `Filename` | The resolved file name. |
+| `SourceUrl` | The URL the bytes were fetched from. |
+| `Text(encoding?)` | Decode the bytes as UTF-8 (or a given encoding). Lossy; never throws. |
+| `SaveAsAsync(path)` | Write the buffered bytes to a local path (no re-fetch). |
+
+## Handle errors
+
+Byte retrieval can fail for a few well-defined reasons. All of them share a common base error, so a single check catches any of them and a new one can be added later without callers changing:
+
+```csharp
+using Microsoft.Teams.Apps.Files;
+```
+
+| Error | Raised when | Carries |
+|---|---|---|
+| **File URL expired** | The short-lived, pre-authorized download link lapsed before the bytes were fetched. | `reason`: <br/> **first fetch**, the link had a

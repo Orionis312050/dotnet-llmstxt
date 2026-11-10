@@ -1,0 +1,885 @@
+lready lapsed so no bytes were retrieved; <br /> **re-read**, an earlier download succeeded, but a later read through the same handle came after expiry. Avoid this by downloading once and reusing the downloaded file. |
+| **No Graph credential** | The Graph read an agentic user's file needs was ruled out before the request, because no credential was available. | `actor`<sup><a href="#actor">2</a></sup>: the identity a credential was being resolved for. <br /> `cause`: why acquiring the token failed, when it failed rather than simply returning nothing. |
+| **File access denied** | The Graph read an agentic user's file needs was refused by the storage service. | `status`: `401` when the token itself was rejected, `403` when the identity lacks the grant<sup><a href="#access-denied">1</a></sup>. <br/> `actor`<sup><a href="#actor">2</a></sup>: the identity that was refused. <br /> `details`: what the service said, if anything. |
+| **Inline image could not be converted** | The Teams service could not convert a pasted image for download. See [Formats that cannot be downloaded](#receiving-inline-images). | `status`: `415`. <br /> `code`: the service's error code, such as `TransformationFailed`, when present. <br /> `details`: what the service said, if anything. <br /> `actor`<sup><a href="#actor">2</a></sup>: the identity the read was attempted as. |
+| **Inline image access denied** | The Bot API refused the token presented for a pasted image. | `status`: `401` when the token itself was rejected, `403` when the identity is not allowed to read the image. <br /> `actor`<sup><a href="#actor">2</a></sup>: the identity that was refused. <br /> `details`: what the service said, if anything. |
+| **File scope not supported** | Download was called on a file from a conversation scope this API does not yet support, meaning anything other than personal, group chat, or channel for an agentic user. A traditional bot receives files only in personal (1:1) chats. | `scope`: the conversation scope. |
+
+<sup id="access-denied">1</sup> A **`403`** deliberately collapses causes the SDK cannot differentiate: an unconsented permission, a file the identity was never granted, and an item that does not exist all arrive the same way. There is no separate "file not found" case to branch on; `details` carries the service's own text for diagnosis. In a standard channel, a file picked from OneDrive or SharePoint, rather than uploaded, can be refused this way, because Teams does not grant the agent access to the picked item (see [Group chats and channels](#group-chats-and-channels)). A `401` is a different problem, which is why the status is reported rather than folded in: the token was rejected, so the fix is the token rather than the sharing.
+
+<sup id="actor">2</sup> `actor` names which identity the read was attempted as. The SDK chooses it, and today there are two:
+
+- **Agentic user**, chosen whenever the inbound activity carries an agentic identity. An agentic user reads as itself rather than as an app. Its Graph scopes come from its blueprint's inheritable permissions set by a tenant administrator or from a direct grant by a user with permissions to share it.
+- **App**, chosen for every other activity. Graph file retrieval is supported for agentic users, which read as their own identity; an app identity and user-delegated permissions may be used, but are not supported through the SDK at this time.
+
+The actor is absent when the failure came before any identity was selected, which is the case when the app has no Graph route configured at all.
+
+A transport or service failure, such as a Graph 5xx, is not one of these and surfaces as an ordinary error.
+
+You may add error handling based on the type of error: 
+
+```csharp
+try
+{
+    DownloadedFile downloaded = await file.DownloadAsync(cancellationToken);
+    // ...
+}
+catch (FileUrlExpiredException err) when (err.Reason == FileUrlExpiredReason.FirstFetch)
+{
+    await context.ReplyAsync("That file link has expired before it could be read.", cancellationToken);
+}
+catch (FileCredentialException err)
+{
+    await context.ReplyAsync($"Could not read that file as {err.Actor?.ToString() ?? "the identity used"}: no Graph credential was available.", cancellationToken);
+}
+catch (FileAccessException err)
+{
+    await context.ReplyAsync($"Could not read that file as {err.Actor?.ToString() ?? "the identity used"}: the service returned {err.Status}.", cancellationToken);
+}
+catch (InlineImageTransformationException)
+{
+    await context.ReplyAsync("That pasted image cannot be downloaded. Try sending it as a file attachment instead.", cancellationToken);
+}
+catch (InlineImageAccessException err)
+{
+    await context.ReplyAsync($"Could not read that pasted image as {err.Actor?.ToString() ?? "the identity used"}: the service returned {err.Status}.", cancellationToken);
+}
+catch (FileScopeNotSupportedException err)
+{
+    await context.ReplyAsync($"Downloading files from {err.Scope} conversations is not supported yet.", cancellationToken);
+}
+catch (FileException)
+{
+    // Any future inbound-file failure lands here rather than escaping unhandled.
+    await context.ReplyAsync("That file could not be read.", cancellationToken);
+}
+```
+
+## Access the raw attachment
+
+Every file the accessor returns retains its original wire attachment on `Raw`, for diagnostics or for the rare case where you need a field the typed surface does not expose:
+
+```csharp
+using System.Text.Json;
+
+IncomingFile? file = await context.Files.FirstAsync(cancellationToken);
+
+if (file is not null)
+{
+    // `Raw` is the untyped wire attachment: the escape hatch when you need a
+    // field the typed surface does not expose. Here we serialize the whole
+    // attachment to inspect exactly what the platform sent.
+    string wire = JsonSerializer.Serialize(file.Raw);
+    await context.ReplyAsync($"raw attachment: {wire}", cancellationToken);
+}
+```
+
+Attachments that are **not** files or inline images (Adaptive Cards, mentions, link previews), and malformed file entries the accessor skips, are not returned by `ListAsync()` and therefore have no `IncomingFile`. Reach those directly through `context.Activity.Attachments`. The HTML attachment that accompanies a pasted image is also only in that array; see [Receiving Inline Images](#receiving-inline-images).
+
+## Conversation scope support
+
+Listing with `ListAsync()` surfaces the files Teams delivers on the incoming activity. What gets delivered and downloaded depends on the conversation scope and on whether your agent is a traditional bot or an agentic user.
+
+### Personal chats
+
+Downloading in personal (1:1) chats depends on the URL the platform sends, not on who is reading. A traditional bot receives a short-lived, pre-authorized download link, which the SDK fetches directly with no token attached.
+
+An **agentic user** receives no pre-authorized link. Its attachment data carries only a `contentUrl` locating the item in OneDrive or SharePoint, so the SDK resolves the bytes through Microsoft Graph's `/shares` endpoint using the agent's own credential. The call behavior is unchanged from above; only the downloading route underneath differs.
+
+If an agentic user has no usable Graph credential, the read fails with `FileCredentialException`; if the storage service refuses the read, for example because the file isn't shared with the agent, it fails with `FileAccessException` (see [Handle errors](#handle-errors)). Both name the identity involved rather than reporting the file as missing.
+
+### Group chats and channels
+
+:::info[Coming Soon]
+Receiving files as an agentic user in group chats and channels is planned for the next SDK release, version 2.2.0.
+:::
+
+In **group chats** and **channels**, the attachment has the same shape, carrying only a `contentUrl`. The SDK reads it through Graph `/shares` using the agent's own credential. Your handler code is the same too: call `ListAsync()` and then `DownloadAsync()`, and the SDK chooses the agent's credential.
+
+Outside personal chats, only messages that @mention the agent reach it, so a file posted without an @mention is never delivered.
+
+A file can be attached by uploading it from the device or by picking it from OneDrive or SharePoint. Whether each kind downloads depends on the conversation:
+
+- In **group chats**, both kinds download.
+- In **private channels**, both kinds download. A picked file is delivered as a copy in the channel's site.
+- In **non-private channels**, files uploaded from the device download, but a picked file can be refused, because Teams does not grant the agent access to the picked item. The refusal surfaces as `FileAccessException` with a `403` status (see [Handle errors](#handle-errors)).
+
+The SDK reads each file as the agent, so a download succeeds only when the agent already has access to that file. A sharing link that doesn't name the agent, such as an "Anyone" link or an organization-wide link, doesn't give it that access.
+
+Files attached to a reply in a channel thread follow the same rules as files on a new post.
+
+A traditional bot cannot receive files in group chats or channels: the attached file isn't delivered to it on the activity, so `ListAsync()` doesn't surface it.
+
+## Next steps
+
+- See [Files in Teams bots](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/bots-filesv4) for the platform-side file model.
+
+---
+
+### PAGE: Sending Widgets
+
+# Sending Widgets
+
+The simplest widget is static HTML with no callbacks.
+The SDK build helpers take a widget payload and produce a message with the correct `extendedmarkdown` text format and the fenced `html-widget` code block already assembled.
+
+:::warning Preview
+HTML Widgets are in preview and the API surface may change. HTML Widgets are planned for public preview on 11/16.
+:::
+
+:::warning Message export
+There is a gap in the export APIs that prevents widget content from being exported. If your organization determines this is a problem, you can disable bots that may send widgets.
+:::
+
+## Building a widget message
+
+Use `HtmlWidgetHelpers.BuildHtmlWidgetMessage` to turn a payload into a message you can send directly. The helper sets the text format to `extendedmarkdown` and wraps the payload in the fenced `html-widget` block. You only need to provide `Name`, `Html`, and `Domain`; the `Type` defaults to `widget/mcp-ui`.
+
+```csharp
+using Microsoft.Teams.Apps.HtmlWidget;
+
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    var message = HtmlWidgetHelpers.BuildHtmlWidgetMessage(
+        new HtmlWidgetPayload
+        {
+            Name = "Simple Widget",
+            Html = "<div>Hello from a widget</div>",
+            Domain = "https://teams.microsoft.com",
+        });
+
+    await context.SendAsync(message, cancellationToken);
+});
+```
+
+The examples on this page use minimal HTML to show the helpers. The SDK sends your HTML unchanged, so a widget that needs to report its size must also complete the handshake and report its height, as described in [Your widget owns the handshake and sizing](./#your-widget-owns-the-handshake-and-sizing).
+
+## Adding text before and after
+
+You often want to introduce a widget with a sentence, or add a note after it.
+The build helpers accept options for text to place before and after the widget block.
+
+```csharp
+var message = HtmlWidgetHelpers.BuildHtmlWidgetMessage(
+    new HtmlWidgetPayload
+    {
+        Name = "Simple Widget",
+        Html = "<div>Hello from a widget</div>",
+        Domain = "https://teams.microsoft.com",
+    },
+    new HtmlWidgetMarkdownOptions
+    {
+        Before = "Here is a simple static widget:",
+        After = "No callbacks needed for static content.",
+    });
+
+await context.SendAsync(message, cancellationToken);
+```
+
+## Building the markdown directly
+
+The message helper covers the common case, but it produces one complete message from a single payload. Build just the markdown string when you need to do something the message helper cannot, such as combining more than one widget in a single message, embedding a widget inside text you are already assembling, or setting activity properties the helper does not touch (for example attachments or channel data).
+Remember to set the text format to `extendedmarkdown` so the Teams client parses the widget block.
+
+```csharp
+using Microsoft.Teams.Apps.Schema;
+
+// BuildHtmlWidgetMarkdown returns just the string, so you can compose several
+// widgets into one message or splice a widget into text you already have.
+var weather = HtmlWidgetHelpers.BuildHtmlWidgetMarkdown(
+    new HtmlWidgetPayload
+    {
+        Name = "Weather",
+        Html = "<div>Sunny, 72F</div>",
+        Domain = "https://teams.microsoft.com",
+    });
+
+var forecast = HtmlWidgetHelpers.BuildHtmlWidgetMarkdown(
+    new HtmlWidgetPayload
+    {
+        Name = "Forecast",
+        Html = "<div>Rain tomorrow</div>",
+        Domain = "https://teams.microsoft.com",
+    });
+
+var text = $"Today:\n\n{weather}\n\nLooking ahead:\n\n{forecast}";
+await context.SendAsync(
+    new MessageActivityInput { Text = text, TextFormat = TextFormats.ExtendedMarkdown },
+    cancellationToken);
+```
+
+## Interactive widget HTML
+
+The SDK sends your HTML exactly as authored and does not inject any script into it.
+Every widget must carry its own `ui/initialize` handshake and `ui/notifications/size-changed` reporting, or it will not initialize or size correctly. This is described in [Your widget owns the handshake and sizing](./#your-widget-owns-the-handshake-and-sizing).
+
+---
+
+### PAGE: 🔍 Search commands
+
+# 🔍 Search commands
+
+Message extension search commands allow users to search external systems and insert the results of that search into a message in the form of a card.
+
+## Search command invocation locations
+
+There are two different areas search commands can be invoked from:
+
+1. Compose Area
+2. Compose Box
+
+### Compose Area and Box
+
+![Screenshot of Teams with outlines around the 'Compose Box' (for typing messages) and the 'Compose Area' (the menu option next to the compose box that provides a search bar for actions and apps).](/screenshots/compose-area.png)
+
+## Setting up your Teams app manifest
+
+To use search commands you have to define them in the Teams app manifest. Here is an example:
+
+```json
+"composeExtensions": [
+    {
+        "botId": "${{BOT_ID}}",
+        "commands": [
+            {
+                "id": "searchQuery",
+                "context": [
+                    "compose",
+                    "commandBox"
+                ],
+                "description": "Test command to run query",
+                "title": "Search query",
+                "type": "query",
+                "parameters": [
+                    {
+                        "name": "searchQuery",
+                        "title": "Search Query",
+                        "description": "Your search query",
+                        "inputType": "text"
+                    }
+                ]
+            }
+        ]
+    }
+]
+```
+
+Here we are defining the `searchQuery` search (or query) command.
+
+## Handle submission
+
+Handle the search query submission when the `searchQuery` search command is invoked.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using Microsoft.Teams.Api.Activities.Invokes.MessageExtensions;
+using Microsoft.Teams.Api.MessageExtensions;
+using Microsoft.Teams.Apps.Annotations;
+
+//...
+
+[MessageExtension.Query]
+public Response OnMessageExtensionQuery(
+    [Context] QueryActivity activity,
+    [Context] IContext.Client client,
+    [Context] ILogger log)
+{
+    log.Info("[MESSAGE_EXT_QUERY] Search query received");
+
+    var commandId = activity.Value?.CommandId;
+    var query = activity.Value?.Parameters?.FirstOrDefault(p => p.Name == "searchQuery")?.Value?.ToString() ?? "";
+
+    log.Info($"[MESSAGE_EXT_QUERY] Command: {commandId}, Query: {query}");
+
+    if (commandId == "searchQuery")
+    {
+        return CreateSearchResults(query, log);
+    }
+
+    return new Response
+    {
+        ComposeExtension = new Result
+        {
+            Type = ResultType.Result,
+            AttachmentLayout = Layout.List,
+            Attachments = new List()
+        }
+    };
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using Microsoft.Teams.Apps.MessageExtensions;
+
+//...
+
+bot.OnQuery(async (context, cancellationToken) =>
+{
+    MessageExtensionQuery? query = context.Activity.Value;
+    string? commandId = query?.CommandId;
+    string searchText = query?.Parameters?.FirstOrDefault(p => p.Name == "searchQuery")?.Value ?? "";
+
+    if (commandId == "searchQuery")
+    {
+        return CreateSearchResults(searchText);
+    }
+
+    return MessageExtensionResponse.CreateBuilder()
+        .WithType(MessageExtensionResponseTypes.Message)
+        .WithText("Unknown command")
+        .Build();
+});
+```
+
+`CreateSearchResults()` method
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using Microsoft.Teams.Api.MessageExtensions;
+using Microsoft.Teams.Cards;
+using Microsoft.Teams.Common;
+
+//...
+
+private static Response CreateSearchResults(string query, ILogger log)
+{
+    var attachments = new List();
+
+    // Create simple search results
+    for (int i = 1; i <= 5; i++)
+    {
+        var card = new AdaptiveCard
+        {
+            Body = new List
+            {
+                new TextBlock($"Search Result {i}")
+                {
+                    Weight = TextWeight.Bolder,
+                    Size = TextSize.Large
+                },
+                new TextBlock($"Query: '{query}' - Result description for item {i}")
+                {
+                    Wrap = true,
+                    IsSubtle = true
+                }
+            }
+        };
+
+        var previewCard = new ThumbnailCard()
+        {
+            Title = $"Result {i}",
+            Text = $"This is a preview of result {i} for query '{query}'."
+        };
+
+        var attachment = new Microsoft.Teams.Api.MessageExtensions.Attachment
+        {
+            ContentType = ContentType.AdaptiveCard,
+            Content = card,
+            Preview = new Microsoft.Teams.Api.MessageExtensions.Attachment
+            {
+                ContentType = ContentType.ThumbnailCard,
+                Content = previewCard
+            }
+        };
+
+        attachments.Add(attachment);
+    }
+
+    return new Response
+    {
+        ComposeExtension = new Result
+        {
+            Type = ResultType.Result,
+            AttachmentLayout = Layout.List,
+            Attachments = attachments
+        }
+    };
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using Microsoft.Teams.Apps.MessageExtensions;
+using Microsoft.Teams.Apps.Schema;
+
+//...
+
+private static InvokeResponse CreateSearchResults(string query)
+{
+    var attachments = new List();
+
+    for (int i = 1; i <= 5; i++)
+    {
+        // Thumbnail cards with a tap/invoke value to trigger OnSelectItem
+        var previewCard = new
+        {
+            title = $"Result {i}",
+            text = $"This is a preview of result {i} for query '{query}'.",
+            tap = new
+            {
+                type = "invoke",
+                value = new { itemIndex = i, query }
+            }
+        };
+
+        attachments.Add(TeamsAttachment.CreateBuilder()
+            .WithContent(previewCard)
+            .WithContentType(AttachmentContentTypes.ThumbnailCard)
+            .Build());
+    }
+
+    return MessageExtensionResponse.CreateBuilder()
+        .WithType(MessageExtensionResponseTypes.Result)
+        .WithAttachmentLayout(TeamsAttachmentLayouts.List)
+        .WithAttachments([.. attachments])
+        .Build();
+}
+```
+
+To implement custom actions when a user clicks on a search result item, you can handle the select item event:
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Api;
+using Microsoft.Teams.Api.Activities.Invokes.MessageExtensions;
+using Microsoft.Teams.Api.MessageExtensions;
+using Microsoft.Teams.Apps.Annotations;
+using Microsoft.Teams.Cards;
+
+//...
+
+[MessageExtension.SelectItem]
+public Response OnMessageExtensionSelectItem(
+    [Context] SelectItemActivity activity,
+    [Context] IContext.Client client,
+    [Context] ILogger log)
+{
+    log.Info("[MESSAGE_EXT_SELECT_ITEM] Item selection received");
+
+    var selectedItem = activity.Value;
+    log.Info($"[MESSAGE_EXT_SELECT_ITEM] Selected: {JsonSerializer.Serialize(selectedItem)}");
+
+    return CreateItemSelectionResponse(selectedItem, log);
+}
+
+// Helper method to create item selection response
+private static Response CreateItemSelectionResponse(object? selectedItem, ILogger log)
+{
+    var itemJson = JsonSerializer.Serialize(selectedItem);
+
+    var card = new AdaptiveCard
+    {
+        Schema = "http://adaptivecards.io/schemas/adaptive-card.json",
+        Body = new List
+        {
+            new TextBlock("Item Selected")
+            {
+                Weight = TextWeight.Bolder,
+                Size = TextSize.Large,
+                Color = TextColor.Good
+            },
+            new TextBlock("You selected the following item:")
+            {
+                Wrap = true
+            },
+            new TextBlock(itemJson)
+            {
+                Wrap = true,
+                FontType = FontType.Monospace,
+                Separator = true
+            }
+        }
+    };
+
+    var attachment = new Microsoft.Teams.Api.MessageExtensions.Attachment
+    {
+        ContentType = new ContentType("application/vnd.microsoft.card.adaptive"),
+        Content = card
+    };
+
+    return new Response
+    {
+        ComposeExtension = new Result
+        {
+            Type = ResultType.Result,
+            AttachmentLayout = Layout.List,
+            Attachments = new List { attachment }
+        }
+    };
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Apps.MessageExtensions;
+using Microsoft.Teams.Apps.Schema;
+using Microsoft.Teams.Cards;
+
+//...
+
+bot.OnSelectItem(async (context, cancellationToken) =>
+{
+    JsonElement selectedItem = context.Activity.Value;
+    string itemJson = JsonSerializer.Serialize(selectedItem);
+
+    var card = new AdaptiveCard
+    {
+        Body = new List
+        {
+            new TextBlock("Item Selected")
+            {
+                Weight = TextWeight.Bolder,
+                Size = TextSize.Large,
+                Color = TextColor.Good
+            },
+            new TextBlock("You selected the following item:") { Wrap = true },
+            new TextBlock(itemJson) { Wrap = true, FontType = FontType.Monospace, Separator = true }
+        }
+    };
+
+    TeamsAttachment attachment = TeamsAttachment.CreateBuilder()
+        .WithAdaptiveCard(JsonSerializer.SerializeToElement(card))
+        .Build();
+
+    return MessageExtensionResponse.CreateBuilder()
+        .WithType(MessageExtensionResponseTypes.Result)
+        .WithAttachmentLayout(TeamsAttachmentLayouts.List)
+        .WithAttachments(attachment)
+        .Build();
+});
+```
+
+The search results include both a full adaptive card and a preview card. The preview card appears as a list item in the search command area:
+
+![Screenshot of Teams showing a message extensions search menu open with list of search results displayed as preview cards.](/screenshots/preview-card.png)
+
+When a user clicks on a list item the dummy adaptive card is added to the compose box:
+
+![Screenshot of Teams showing the selected adaptive card added to the compose box.](/screenshots/card-in-compose.png)
+
+To implement custom actions when a user clicks on a search result item, you can add the `tap` property to the preview card. This allows you to handle the click event with custom logic:
+
+## Resources
+
+- [Search command](https://learn.microsoft.com/en-us/microsoftteams/platform/messaging-extensions/how-to/search-commands/define-search-command?tabs=Teams-toolkit%2Cdotnet)
+- [Just-In-Time Install](https://learn.microsoft.com/en-us/microsoftteams/platform/messaging-extensions/how-to/search-commands/universal-actions-for-search-based-message-extensions#just-in-time-install)
+
+---
+
+### PAGE: Exposing Teams to AI Agents (MCP)
+
+# Exposing Teams to AI Agents (MCP)
+
+:::warning[Our AI libraries are deprecated]
+The Teams SDK has deprecated its own AI libraries — the `@microsoft/teams.ai` packages (`ChatPrompt`, `Model`, and the older `@microsoft/teams.mcp` / `@microsoft/teams.a2a` plugins) — in favor of dedicated AI frameworks. Use the pattern shown in these guides instead: bring the OpenAI SDK (or any framework you like), and wire MCP and A2A directly into your Teams app.
+:::
+
+:::warning[SDK 2.0 AI libraries are deprecated]
+In .NET, use SDK 2.1 and host MCP endpoints alongside your Teams endpoint in the same ASP.NET app. Treat Teams as the interaction channel and MCP as the agent-facing control plane.
+:::
+
+This guide turns your Teams bot into an [MCP](https://modelcontextprotocol.io/introduction) server, enabling external AI agents to interact with users in Teams. Through this server, agents can find users by name, send messages into chats, ask questions, and trigger workflows such as notifications or approvals — turning Teams into a communication surface for agent-to-human interaction.
+
+The bot and the MCP server run in the same process, exposing two HTTP surfaces: `/api/messages` for Teams and `/mcp` for agents.
+
+<img
+  src=McpServerImgUrl
+  alt="Animated screenshot of an AI agent calling the Teams MCP server: it resolves a user by name, sends a notification, then asks a question that lands in the user's Teams chat."
+  style={ width: '100%', maxWidth: 900 }
+/>
+
+This guide is based on [`core/samples/McpServer`](https://github.com/microsoft/teams.net/tree/main/core/samples/McpServer): a single ASP.NET process hosts both Teams (`/api/messages`) and MCP (`/mcp`).
+
+## Defining a tool
+
+An MCP tool is a function exposed by the server and discoverable by clients. The function signature defines the input schema, the return type defines the output, and the description tells the agent when to use it.
+
+The sample uses MCP tool attributes for discovery:
+
+```csharp
+[McpServerToolType]
+public sealed class McpTools(TeamsBotApplication app, State state, IConfiguration config, GraphClient graph)
+{
+    [McpServerTool(Name = "notify"), Description("Send a notification to a Teams user. No response expected.")]
+    public async Task Notify(string userId, string message, CancellationToken cancellationToken = default) { ... }
+}
+```
+
+## Finding users by name
+
+The agent talks in terms of names ("message Mehak about the deploy"), but every other tool needs an **AAD object id**. `find_user` bridges that gap by searching the tenant directory through Microsoft Graph, using the bot's own app identity.
+
+`find_user` delegates to a Graph client and returns stable IDs:
+
+```csharp
+[McpServerTool(Name = "find_user"), Description("Find users in this tenant by partial name, email, or UPN.")]
+public async Task FindUser(string query, CancellationToken cancellationToken = default)
+{
+    IReadOnlyList matches = await graph.SearchUsersAsync(query, top: 5, cancellationToken);
+    return new FindUserResult(matches);
+}
+```
+
+This requires the bot's app registration to have the **`User.ReadBasic.All`** (Microsoft Graph, Application) permission with admin consent granted.
+
+## Sending proactive notifications
+
+A one-way notification needs no response. The tool resolves the user's 1:1 conversation — opening one proactively if the user hasn't messaged the bot — and sends the message.
+
+`notify` resolves/creates a DM conversation and sends proactively:
+
+```csharp
+string conversationId = await GetOrCreateConversationAsync(userId, cancellationToken);
+MessageActivityInput notifyActivity = new MessageActivityInput().WithText(message);
+await app.ConversationClient.SendActivityAsync(conversationId, notifyActivity, state.ServiceUrl, cancellationToken: cancellationToken);
+```
+
+See [Proactive Messaging](#proactive-messaging) for the full story on how Teams handles bot-initiated conversations.
+
+## Asking the user a question
+
+Unlike notifications, questions need a response. The flow is split into two tools: `ask` sends an Adaptive Card with a reply box and returns a `requestId`; `wait_for_reply` blocks until the user submits (or a timeout fires). Recording the pending ask **before** sending the card means a fast reply is never lost.
+
+`ask` + `wait_for_reply` use request IDs and waiter tasks:
+
+```csharp
+state.PendingAsks[requestId] = new PendingAsk(userId);
+await app.ConversationClient.SendActivityAsync(conversationId,
+    new MessageActivityInput().WithAdaptiveCardAttachment(Cards.AskCard(requestId, question)),
+    state.ServiceUrl,
+    cancellationToken: cancellationToken);
+```
+
+```csharp
+TaskCompletionSource waiter = state.ReplyWaiters.GetOrAdd(
+    requestId,
+    _ => new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+PendingAsk result = await waiter.Task.WaitAsync(TimeSpan.FromSeconds(timeoutSeconds), cancellationToken);
+```
+
+The user's typed reply arrives through a card-action handler, which records the answer and wakes up any `wait_for_reply` caller parked on it.
+
+Card submit updates pending state and resolves waiting callers:
+
+```csharp
+case "ask_reply":
+    return HandleAskReply(action, state);
+...
+if (state.ReplyWaiters.TryRemove(requestId, out TaskCompletionSource? waiter))
+    waiter.TrySetResult(answered);
+```
+
+## Requesting an approval
+
+For decisions that need a clear outcome — approving a deployment, confirming an action — an Adaptive Card with explicit **Approve** / **Reject** buttons is clearer than free text. The shape mirrors the ask flow: `request_approval` returns an `approvalId`, and `wait_for_approval` blocks for the decision.
+
+Approvals mirror the ask pattern with explicit decision state:
+
+```csharp
+state.Approvals[approvalId] = ApprovalStatus.Pending;
+await app.ConversationClient.SendActivityAsync(conversationId,
+    new MessageActivityInput().WithAdaptiveCardAttachment(Cards.ApprovalCard(approvalId, title, description)),
+    state.ServiceUrl,
+    cancellationToken: cancellationToken);
+```
+
+The user's choice arrives through the same card-action mechanism as the ask flow — the `approval_response` handler records the decision and wakes up any `wait_for_approval` caller.
+
+Approval card submit wakes `wait_for_approval`:
+
+```csharp
+if (state.ApprovalWaiters.TryRemove(approvalId, out TaskCompletionSource<string>? waiter))
+    waiter.TrySetResult(decision);
+```
+
+## Wiring the MCP server into your Teams app
+
+The Teams bot handles `/api/messages`, while the MCP server is mounted on the same HTTP server at `/mcp`.
+
+Wire Teams and MCP into one app:
+
+```csharp
+WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+builder.Services.AddTeamsBotApplication();
+builder.Services.AddSingleton();
+builder.Services
+    .AddMcpServer()
+    .WithHttpTransport()
+    .WithTools();
+
+WebApplication webApp = builder.Build();
+TeamsBotApplication bot = webApp.UseTeamsBotApplication();
+webApp.MapMcp("/mcp");
+webApp.Run();
+```
+
+## Testing with MCP Inspector
+
+The easiest way to drive the server before wiring up a real agent is the [MCP Inspector](https://modelcontextprotocol.io/legacy/tools/inspector):
+
+```bash
+npx @modelcontextprotocol/inspector
+```
+
+Set the transport to **Streamable HTTP** and the URL to `http://localhost:3978/mcp`, then connect and call `find_user` → `ask` → `wait_for_reply` to drive a full round-trip with a real Teams user.
+
+---
+
+### PAGE: Handling Multi-Step Forms
+
+# Handling Multi-Step Forms
+
+Dialogs can become complex yet powerful with multi-step forms. These forms can alter the flow of the survey depending on the user's input or customize subsequent steps based on previous answers.
+
+## Creating the Initial Dialog
+
+Start off by sending an initial card in the `TaskFetch` event.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Api;
+using Microsoft.Teams.Api.TaskModules;
+using Microsoft.Teams.Cards;
+
+//...
+
+private static Response CreateMultiStepFormDialog()
+{
+    var cardJson = """
+    {
+        "type": "AdaptiveCard",
+        "version": "1.4",
+        "body": [
+            {
+                "type": "TextBlock",
+                "text": "This is a multi-step form",
+                "size": "Large",
+                "weight": "Bolder"
+            },
+            {
+                "type": "Input.Text",
+                "id": "name",
+                "label": "Name",
+                "placeholder": "Enter your name",
+                "isRequired": true
+            }
+        ],
+        "actions": [
+            {
+                "type": "Action.Submit",
+                "title": "Submit",
+                "data": {"submissiondialogtype": "webpage_dialog_step_1"}
+            }
+        ]
+    }
+    """;
+
+    var dialogCard = JsonSerializer.Deserialize(cardJson)
+        ?? throw new InvalidOperationException("Failed to deserialize multi-step form card");
+
+    var taskInfo = new TaskInfo
+    {
+        Title = "Multi-step Form Dialog",
+        Card = new Attachment
+        {
+            ContentType = new ContentType("application/vnd.microsoft.card.adaptive"),
+            Content = dialogCard
+        }
+    };
+
+    return new Response(new ContinueTask(taskInfo));
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Apps.Schema;
+using Microsoft.Teams.Apps.TaskModules;
+using Microsoft.Teams.Cards;
+
+//...
+
+private static InvokeResponse CreateMultiStepFormDialog()
+{
+    var dialogCard = new AdaptiveCard
+    {
+        Body = new List
+        {
+            new TextBlock("This is a multi-step form")
+            {
+                Size = TextSize.Large,
+                Weight = TextWeight.Bolder
+            },
+            new TextInput
+            {
+                Id = "name",
+                Label = "Name",
+                Placeholder = "Enter your name",
+                IsRequired = true
+            }
+        },
+        Actions = new List
+        {
+            new SubmitAction
+            {
+                Title = "Submit",
+                Data = new { submissiondialogtype = "webpage_dialog_step_1" }
+            }
+        }
+    };
+
+    TeamsAttachment attachment = TeamsAttachment.CreateBuilder()
+        .WithAdaptiveCard(JsonSerializer.SerializeToElement(dialogCard))
+        .Build();
+
+    return TaskModuleResponse.CreateBuilder()
+        .WithType(TaskModuleResponseTypes.Continue)
+        .WithTitle("Multi-step Form Dialog")
+        .WithHeight("medium")
+        .WithWidth("medium")
+        .WithCard(attachment)
+        .Build();
+}
+```
+
+Then in the submission handler, you can choose to `continue` the dialog with a different card.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Api;
+using Microsoft.Teams.Api.TaskModules;
+using Microsoft.Teams.Cards;
+
+//...
+
+// Add these cases to your OnTaskSubmit method
+case "webpage_dialog_step_1":
+    var nameStep1 = GetFormValue("name") ?? "Unknown";
+    var nextStepCardJson = $$"""
+    {
+        "type": "AdaptiveCard",
+        "version": "1.4",
+        "body": [
+            {
+                "type": "TextBlock",
+                "text": "Email",
+                "size": "Large",
+                "weight": "Bolder"
+            },
+            {
+      

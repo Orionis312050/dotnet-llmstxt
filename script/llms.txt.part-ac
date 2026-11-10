@@ -1,0 +1,907 @@
+amed message appears in the thread pane (checked live with TypeScript and Python).
+In a channel, if the service answers 404 to the reply chain route, the first chunk falls back to the inbound conversation, as with `SendAsync()`, and stays in the thread.
+In a 1:1 chat, a failed reply chain route does not fall back.
+The first request of a streamed message can be sent by `writer.AppendResponseAsync()`, `writer.SendInformativeUpdateAsync()` or `writer.FinalizeResponseAsync()`, and each of these awaited calls throws an error from it.
+
+`TeamsStreamingWriter.CreateFromContext(context)` applies this placement.
+The options that carry it are internal, so there is no other way to start a writer in a reply chain.
+
+## @Mention
+
+Sending a message at `@mentions` a user is as simple including the details of the user using the `AddMention` method
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async (context, cancellationToken) =>
+{
+    await context.Send(new MessageActivity("hi!").AddMention(context.Activity.From), cancellationToken);
+});
+```
+
+**SDK 2.1+:**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    await context.SendAsync(
+        new MessageActivityInput()
+            .WithText("hi!")
+            .AddMention(context.Activity.From),
+        cancellationToken);
+});
+```
+
+## Targeted Messages
+
+Targeted messages, also known as ephemeral messages, are delivered to a specific user in a shared conversation. From a single user's perspective, they appear as regular inline messages in a conversation. Other participants won't see these messages, making them useful for authentication flows, help or error responses, personal reminders, or sharing contextual information without cluttering the group conversation.
+
+To send a targeted message when responding to an incoming activity, use the `WithRecipient` method with the recipient account and set the targeting flag to true.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async (context, cancellationToken) =>
+{
+    // Using WithRecipient with isTargeted=true explicitly targets the specified recipient
+    await context.Send(
+        new MessageActivity("This message is only visible to you!")
+            .WithRecipient(context.Activity.From, isTargeted: true),
+        cancellationToken
+    );
+});
+```
+
+**SDK 2.1+:**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    // Using WithRecipient with isTargeted=true explicitly targets the specified recipient
+    await context.SendAsync(
+        new MessageActivityInput()
+            .WithText("This message is only visible to you!")
+            .WithRecipient(context.Activity.From, isTargeted: true),
+        cancellationToken
+    );
+});
+```
+
+### Prompt Preview
+
+:::info[Coming Soon]
+Prompt Preview is coming soon in June 2026.
+:::
+
+Prompt Preview shows a compact, collapsible preview of the targeted message your agent is replying to, helping carry context from a private user-to-agent message into the reply.
+
+#### Prompt Preview in targeted reply
+
+In a targeted (private) reply, both the prompt preview and the bot response are visible only to the targeted user.
+
+![Prompt Preview in a targeted reply.](/screenshots/private-prompt-preview.png)
+
+#### Prompt Preview in public reply
+
+In a public reply, the same prompt preview appears above the bot response and is visible to everyone in the conversation.
+
+![Prompt Preview in a public reply.](/screenshots/public-prompt-preview.png)
+
+In reactive scenarios, when replying to an inbound targeted activity through `SendAsync()` or `ReplyAsync()`, the SDK automatically includes targeted message info.
+
+For proactive scenarios (using `app.SendAsync()`), attach targeted message info using the targeted message ID you are replying to.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+var targetedMessageId = "1772050244572";
+var conversationId = "19:groupchat-id@thread.v2";
+var userAccount = new Account
+{
+    Id = "29:1AbCDef...",
+    Name = "Adele Vance"
+};
+
+var targetedMessage = new MessageActivityInput()
+    .WithText("Here is the result!")
+    .AddTargetedMessageInfo(targetedMessageId)
+    .WithRecipient(userAccount, isTargeted: true);
+
+// Targeted reply (only the user sees it)
+await app.Send(conversationId, targetedMessage);
+
+// OR public reply (everyone sees it)
+var publicMessage = new MessageActivityInput()
+    .WithText("Here is the result!")
+    .AddTargetedMessageInfo(targetedMessageId);
+await app.Send(conversationId, publicMessage);
+```
+
+**SDK 2.1+:**
+
+```csharp
+var targetedMessageId = "1772050244572";
+var conversationId = "19:groupchat-id@thread.v2";
+var userAccount = new Account
+{
+    Id = "29:1AbCDef...",
+    Name = "Adele Vance"
+};
+
+var targetedMessage = new MessageActivity("Here is the result!")
+    .AddTargetedMessageInfo(targetedMessageId)
+    .WithRecipient(userAccount, isTargeted: true);
+
+// Targeted reply (only the user sees it)
+await app.Send(conversationId, targetedMessage);
+
+// OR public reply (everyone sees it)
+var publicMessage = new MessageActivity("Here is the result!")
+    .AddTargetedMessageInfo(targetedMessageId);
+await app.Send(conversationId, publicMessage);
+```
+
+## Reactions
+
+Reactions allow your agent to add or remove emoji reactions on messages in a conversation, and to receive reactions added by users. See the [Message Reactions guide](#message-reactions) for full coverage.
+
+## Threading
+
+In Teams channels and 1:1 agent chats, the SDK can send messages into reply chains (threads).
+The SDK provides helpers to simplify working with threads.
+
+In this guide, top-level means a message in the main chat or channel conversation, and in-thread means a message in a reply chain (thread).
+
+Where a message lands depends on the method and the scope:
+
+| Method | 1:1 chat | Channel |
+|---|---|---|
+| `context.SendAsync()` | Matches level of user's message | In-thread |
+| `context.ReplyAsync()` | Matches level of user's message | In-thread |
+
+The SDK places a response in a reply chain only when `channelData.replyChain.id` is present on the inbound activity.
+With no `replyChain`, these methods send to the inbound conversation.
+
+The reply method, `context.ReplyAsync()`, also quotes the user's message.
+To reply in-thread to a top-level message in a 1:1 chat, or to send a top-level message from inside a thread, see [Proactive Messaging](#proactive-messaging).
+
+### Reactive Threading (Within a Handler)
+
+When your agent receives a message in a reply chain (thread), the context sends into that same reply chain.
+In a channel, replying to a top-level post also sends into that post's thread.
+In a 1:1 chat, a response to a top-level message is also top-level, and a thread is started explicitly with a proactive reply (see below).
+Use `SendAsync()` to send reactively without quoting, or `ReplyAsync()` to send a reactive, quoted reply.
+In a channel the answer is in the same thread, and in a 1:1 chat it matches the level of the inbound message.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async (context, cancellationToken) =>
+{
+    // Send in the same thread, no quote
+    await context.Send("Acknowledged", cancellationToken);
+
+    // Send in the same thread with a visual quote of the inbound message
+    await context.Reply("Got it!", cancellationToken);
+});
+```
+
+**SDK 2.2:**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    // Send reactively without quoting.
+    // In a channel, sends in the same thread.
+    // In a 1:1 chat, matches the level of the inbound message.
+    await context.SendAsync("Acknowledged", cancellationToken);
+
+    // Send a reactive, quoted reply.
+    // In a channel, sends in the same thread.
+    // In a 1:1 chat, matches the level of the inbound message.
+    await context.ReplyAsync("Got it!", cancellationToken);
+});
+```
+
+#### Where the SDK takes the destination from
+
+The SDK reads `channelData` on the inbound activity to find the destination and does not parse the conversation id.
+To tell a channel from a chat, it also uses `conversation.conversationType`: `channel` selects the channel rules below, and anything else selects the chat rules.
+
+- **Channel:** a response to a `message` is sent through the reply chain `channelData.replyChain.id` of the channel `channelData.channel.id`.
+  If the reply chain route answers HTTP `404`, the SDK sends to the inbound conversation instead.
+  For a channel message, the inbound conversation id already identifies the same thread, so the response stays in it.
+  The SDK checks only the status code.
+- **1:1 chat:** when the inbound activity is inside a thread (see the table below), the response is sent through the reply chain `channelData.replyChain.id` of the chat `channelData.chat.id`.
+  Otherwise it is sent to the inbound conversation, at the top level.
+  An error from the reply chain route is thrown to your handler, and the response is not sent anywhere else.
+- **Missing ids:** when `channelData.replyChain`, or the id of the scope (`channelData.chat.id` in a 1:1 chat, `channelData.channel.id` in a channel), is missing, the SDK does not use the reply chain route and sends to the inbound conversation.
+  In a channel, the inbound conversation id can still keep the response in the thread.
+
+Typing indicators sent with `context.TypingAsync()` are not placed.
+Only message responses are.
+
+#### Responding to edits, reactions and card actions
+
+In a 1:1 chat the SDK also places a response to an inbound activity that is not a typed message.
+It compares `channelData.replyChain.id` with the id of the message the activity acts on, and the activity is inside a thread when they differ.
+
+| Inbound activity | Message it acts on | Inside a thread when |
+|---|---|---|
+| `message` typed by the user | The message, `activity.id` | `replyChain.id` differs from `activity.id` |
+| `messageUpdate`, `messageDelete` | The edited or deleted message, `activity.id` | `replyChain.id` differs from `activity.id` |
+| `messageReaction` | The reacted message, `replyToId` | `replyToId` is a plain number other than `0` that differs from `replyChain.id` |
+| `message` with `channelData.source`, sent by a card button (`messageBack`, `Action.Submit`) | The message with the card, `replyToId` | `replyToId` is a plain number other than `0` that differs from `replyChain.id` |
+| `invoke` with `value.messagePayload` (a message action) | The message the action ran on, `value.messagePayload.id` | That id is a plain number other than `0` that differs from `replyChain.id` |
+| Any other `invoke` with a `replyToId`, such as `adaptiveCard/action` from `Action.Execute`, `task/fetch` and `task/submit` from a card button, or `message/submitAction` feedback | The message with the card or feedback buttons, `replyToId` | `replyToId` is a plain number other than `0` that differs from `replyChain.id` |
+| `invoke` with neither, such as a compose box action or sign-in | None | `replyChain.id` is present |
+| Any other activity, such as `installationUpdate` or `conversationUpdate` | None | Never |
+
+So a response to a card button clicked on a top-level message is top-level, and a response to a card button clicked on a card inside a thread is sent into that thread.
+A `replyToId` that is not a plain number, such as an encrypted id, is never inside a thread.
+
+The SDK uses `conversation.conversationType` only to tell a channel from a chat.
+In a chat it does not require a particular type to place a response.
+In the 1:1 chat of an agentic user, card button clicks (`messageBack`, `Action.Submit`, `Action.Execute`) and the `task/fetch` and `task/submit` invokes they open have arrived with `conversationType` set to `groupChat`, a service issue that is being corrected.
+The SDK places the response to them from `channelData` like any other activity, so a response to a click inside a thread is sent into that thread.
+
+In a channel only a `message` is placed, and a card button click that arrives as a `message` is placed like any other.
+The SDK sends a response to any other activity in a channel to the inbound conversation.
+
+For proactive threading (sending to a thread outside of a handler), see [Proactive Messaging](#proactive-messaging).
+
+#### Experimental status
+
+The reply chain operations on the clients, `ConversationApiClient.CreateReplyChainActivityAsync` and `CreateTargetedReplyChainActivityAsync`, and the core client's `SendReplyChainActivityAsync`, carry `[Experimental("ExperimentalTeamsThreading")]`.
+Calling them directly raises the compiler diagnostic `ExperimentalTeamsThreading` until you suppress it, for example with `#pragma warning disable ExperimentalTeamsThreading`.
+`TeamsChannelData.Chat` and `TeamsChannelData.ReplyChain` (`ChatInfo`, `ReplyChainInfo`) are marked in the XML documentation only.
+`SendAsync`, `ReplyAsync` and `app.ReplyAsync` are not marked.
+
+## Quoted Replies
+
+Quoted replies let your agent reference a previous message in the conversation. When a user sends a message that quotes another message, your agent receives structured metadata about the quoted content. Your agent can also send messages that quote previous messages.
+
+### Receiving Quoted Replies
+
+When a user quotes a message and sends it to your agent, the quoted reply metadata is available on the inbound activity. Use the `GetQuotedMessages()` method to access all quoted reply entities.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async context =>
+{
+    var quotes = context.Activity.GetQuotedMessages();
+
+    if (quotes.Count > 0)
+    {
+        var quote = quotes[0].QuotedReply;
+        await context.Reply(
+            $"You quoted message {quote.MessageId} from {quote.SenderName}: \"{quote.Preview}\"");
+    }
+});
+```
+
+**SDK 2.1+:**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    var quotes = context.Activity.GetQuotedMessages();
+
+    if (quotes.Count > 0)
+    {
+        var quote = quotes[0].QuotedReply;
+        await context.ReplyAsync(
+            $"You quoted message {quote.MessageId} from {quote.SenderName}: \"{quote.Preview}\"",
+            cancellationToken);
+    }
+});
+```
+
+Each quoted reply entity contains the quoted message's ID, sender information, a preview of the quoted text, and whether the quoted message has been deleted.
+
+### Sending a Quoted Reply
+
+When your agent calls `ReplyAsync()`, the SDK automatically stamps a quoted reply entity referencing the inbound message when its id is a plain message id. The reply will appear as a quoted reply in Teams.
+
+This applies when `activity.id` is a plain numeric message id, as it is for messages, edits and deletes.
+Otherwise, for example a card button click or another invoke with an id like `f:<guid>`, the SDK does not quote, and the response is sent like `SendAsync()`, without a quote.
+To quote in a card or invoke handler, quote the message that holds the card with `QuoteAsync()` and its `replyToId`.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async context =>
+{
+    // Reply() automatically quotes the inbound message
+    await context.Reply("Got it!");
+});
+```
+
+**SDK 2.1+:**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    // ReplyAsync() automatically quotes the inbound message
+    await context.ReplyAsync("Got it!", cancellationToken);
+});
+```
+
+To quote a different message in the same conversation (not the inbound message), use the `QuoteAsync()` method with the message ID you want to quote.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async context =>
+{
+    // Quote a specific message by its ID
+    var parentMessageId = "1772050244572";
+    await context.Quote(parentMessageId, "Referencing an earlier message");
+});
+```
+
+**SDK 2.1+:**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    // Quote a specific message by its ID
+    var parentMessageId = "1772050244572";
+    await context.QuoteAsync(parentMessageId, "Referencing an earlier message", cancellationToken);
+});
+```
+
+### Building Quoted Replies for Proactive Send
+
+For proactive scenarios (using `app.Send()`) or when quoting multiple messages, use the `AddQuote()` method on a message activity. Pass the message ID and an optional response text.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+var parentMessageId = "1772050244572";
+var firstMessageId = "1772050244573";
+var secondMessageId = "1772050244574";
+
+// Single quote with response below it
+var msg = new MessageActivityInput()
+    .AddQuote(parentMessageId, "Here is my response");
+await app.Send(conversationId, msg);
+
+// Multiple quotes with interleaved responses
+msg = new MessageActivityInput()
+    .AddQuote(firstMessageId, "response to first")
+    .AddQuote(secondMessageId, "response to second");
+await app.Send(conversationId, msg);
+
+// Grouped quotes — omit response to group quotes together
+msg = new MessageActivityInput()
+    .WithText("see below for previous messages")
+    .AddQuote(firstMessageId)
+    .AddQuote(secondMessageId, "response to both");
+await app.Send(conversationId, msg);
+```
+
+**SDK 2.1+:**
+
+```csharp
+var parentMessageId = "1772050244572";
+var firstMessageId = "1772050244573";
+var secondMessageId = "1772050244574";
+
+// Single quote with response below it
+var msg = new MessageActivity()
+    .AddQuote(parentMessageId, "Here is my response");
+await app.Send(conversationId, msg);
+
+// Multiple quotes with interleaved responses
+msg = new MessageActivity()
+    .AddQuote(firstMessageId, "response to first")
+    .AddQuote(secondMessageId, "response to second");
+await app.Send(conversationId, msg);
+
+// Grouped quotes — omit response to group quotes together
+msg = new MessageActivity("see below for previous messages")
+    .AddQuote(firstMessageId)
+    .AddQuote(secondMessageId, "response to both");
+await app.Send(conversationId, msg);
+```
+
+---
+
+### PAGE: Teams API Client
+
+# Teams API Client
+
+Teams has a number of areas that your application has access to via its API. These are all available via the `context.Api` (and `teams.Api` at the app level) object. Here is a short summary of the different areas:
+
+| Area            | Description                                                                                                                                                          |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Conversations` | Gives your application the ability to perform activities on conversations (send, update, delete messages, etc.), or create conversations (like 1:1 chat with a user) |
+| `Meetings`      | Gives your application access to meeting details and participant information via `GetByIdAsync` and `GetParticipantAsync`                                             |
+| `Teams`         | Gives your application access to team or channel details                                                                                                             |
+
+An instance of the API client is passed to handlers that can be used to fetch details:
+
+## Example
+
+In this example, we use the API client to fetch the members in a conversation. The `Api` object is passed to the activity handler in this case.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async (context, cancellationToken) =>
+{
+    var members = await context.Api.Conversations.Members.Get(context.Conversation.Id);
+});
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    var members = await context.Api.Conversations.Members.GetAsync(
+        context.Activity.Conversation!.Id!,
+        cancellationToken: cancellationToken);
+});
+```
+
+## Proactive API
+
+It's also possible to access the API client from outside a handler via the app instance. Here we have the same example as above, but we're access the API client via the app instance.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+var members = await app.Api.Conversations.Members.Get("...");
+```
+
+**SDK 2.1 (current):**
+
+Outside of a turn, use the app-level `teams.Api` client (point it at the target service URL first):
+
+```csharp
+var api = teams.Api.ForServiceUrl(serviceUrl);
+var members = await api.Conversations.Members.GetAsync(conversationId);
+```
+
+## Meetings Example
+
+In this example, we use the API client to get a specific meeting participant's details, such as their role (e.g. Organizer) and whether they are currently in the meeting. Provide the user's AAD Object ID to specify which participant to look up. The `meetingId` and `tenantId` are available from the activity's channel data.
+
+:::note
+To retrieve **all** members of a meeting, use the conversations API as shown in the [example above](#example), since meetings are also conversations.
+:::
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMeetingStart(async (context, cancellationToken) =>
+{
+    var meetingId = context.Activity.Value.Id;
+    var tenantId = context.Activity.ChannelData?.Tenant?.Id;
+    var userId = context.Activity.From?.AadObjectId;
+
+    if (meetingId != null && tenantId != null && userId != null)
+    {
+        var participant = await context.Api.Meetings.GetParticipantAsync(meetingId, userId, tenantId);
+        // participant.Meeting?.Role — "Organizer", "Presenter", "Attendee"
+        // participant.Meeting?.InMeeting — true/false
+    }
+});
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+teams.OnMeetingStart(async (context, cancellationToken) =>
+{
+    var meetingId = context.Activity.Value.Id;
+    var tenantId = context.Activity.ChannelData?.Tenant?.Id;
+    var userId = context.Activity.From?.AadObjectId;
+
+    if (meetingId != null && tenantId != null && userId != null)
+    {
+        var participant = await context.Api.Meetings.GetParticipantAsync(meetingId, userId, tenantId);
+        // participant.Meeting?.Role — "Organizer", "Presenter", "Attendee"
+        // participant.Meeting?.InMeeting — true/false
+    }
+});
+```
+
+Visit [Meeting Events](#meeting-events) to learn more about meeting events.
+
+---
+
+### PAGE: Graph API Client
+
+# Graph API Client
+
+[Microsoft Graph](https://docs.microsoft.com/en-us/graph/overview) gives you access to the wider Microsoft 365 ecosystem. You can enrich your application with data from across Microsoft 365.
+
+The SDK gives your application easy access to the Microsoft Graph API via the `Microsoft.Graph` package.
+
+## Calling APIs
+
+Microsoft Graph can be accessed by your application using its own application token, or by using the user's token. If you need access to resources that your application may not have, but your user does, you will need to use the user's scoped graph client. To grant explicit consent for your application to access resources on behalf of a user, follow the [auth guide](#user-authentication).
+
+To access the graph using the Graph using the app, you may use the `GraphServiceClient` object to call the endpoint of your choice.
+
+```csharp
+using Azure.Identity;
+using Microsoft.Graph;
+
+var credential = new ClientSecretCredential(
+    configuration["AzureAd:TenantId"],
+    configuration["AzureAd:ClientId"],
+    configuration["AzureAd:ClientCredentials:0:ClientSecret"]);
+
+var graph = new GraphServiceClient(credential, ["https://graph.microsoft.com/.default"]);
+var user = await graph.Me.GetAsync(cancellationToken: cancellationToken);
+Console.WriteLine($"User ID: {user?.Id}");
+Console.WriteLine($"User Display Name: {user?.DisplayName}");
+Console.WriteLine($"User Email: {user?.Mail}");
+Console.WriteLine($"User Job Title: {user?.JobTitle}");
+```
+
+To access Graph with the signed-in user's token, do this in a message handler:
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.OnMessage(async (context, cancellationToken) =>
+{
+    var user = await context.UserGraph.Me.GetAsync();
+    Console.WriteLine($"User ID: {user.id}");
+    Console.WriteLine($"User Display Name: {user.displayName}");
+    Console.WriteLine($"User Email: {user.mail}");
+    Console.WriteLine($"User Job Title: {user.jobTitle}");
+});
+```
+
+Here, the "context.UserGraph" object is a scoped graph client for the user that sent the message.
+
+**SDK 2.1 (current):**
+
+```csharp
+using System.Net.Http.Headers;
+
+var flow = teams.GetOAuthFlow("graph");
+teams.OnMessage(async (context, cancellationToken) =>
+{
+    var token = await flow.SignInAsync(context, cancellationToken);
+    if (token is null) return;
+
+    using var http = new HttpClient();
+    http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+    var meJson = await http.GetStringAsync(
+        "https://graph.microsoft.com/v1.0/me?$select=id,displayName,mail,jobTitle",
+        cancellationToken);
+
+    await context.SendAsync(meJson, cancellationToken);
+});
+```
+
+---
+
+### PAGE: App Authentication
+
+# App Authentication
+
+Your application needs to authenticate to send messages to Teams as your bot. Authentication allows your app service to certify that it is _allowed_ to send messages as your Azure Bot.
+
+:::info Azure Setup Required
+Before configuring your application, you must first set up authentication in Azure. See the [App Authentication Setup](#app-authentication) guide for instructions on creating the necessary Azure resources.
+:::
+
+## Authentication Methods
+
+There are 3 main ways of authenticating:
+
+1. **Client Secret** - Simple password-based authentication using a client secret
+2. **User Assigned Managed Identity** - Passwordless authentication using Azure managed identities
+3. **Federated Identity Credentials** - Advanced identity federation using managed identities
+
+## Configuration Reference
+
+The Teams SDK automatically detects which authentication method to use based on the environment variables you set:
+
+| CLIENT_ID | CLIENT_SECRET | MANAGED_IDENTITY_CLIENT_ID | Authentication Method |
+|-|-|-|-|
+| not_set | | | No-Auth (local development only) |
+| set | set | | Client Secret |
+| set | not_set | | User Assigned Managed Identity |
+| set | not_set | set (same as CLIENT_ID) | User Assigned Managed Identity |
+| set | not_set | set (different from CLIENT_ID) | Federated Identity Credentials (UMI) |
+| set | not_set | "system" | Federated Identity Credentials (System Identity) |
+
+:::info[SDK 2.1]
+SDK 2.1 uses MSAL with standard ASP.NET Core configuration. Developers can authenticate their bot with any supported Microsoft Entra authentication solution by configuring the app according to the [`Microsoft.Identity.Web` credential format](https://learn.microsoft.com/en-us/entra/msidweb/authentication/credentials-overview#configure-credentials-in-appsettingsjson).
+:::
+
+## Client Secret
+
+The simplest authentication method using a password-like secret.
+
+### Setup
+
+First, complete the [Client Secret Setup](/teams/app-authentication/client-secret) in Azure Portal or Azure CLI.
+
+### Configuration
+
+**SDK 2.0 (Legacy):**
+
+Set the following environment variables in your application:
+
+- `CLIENT_ID`: Your Application (client) ID
+- `CLIENT_SECRET`: The client secret value you created
+- `TENANT_ID`: The tenant id where your bot is registered
+ 
+```env
+CLIENT_ID=your-client-id-here
+CLIENT_SECRET=your-client-secret-here
+TENANT_ID=your-tenant-id
+```
+
+**SDK 2.1 (current):**
+
+Configure the following settings in `appsettings.json`:
+
+```json title="appsettings.json"
+{
+  "AzureAd": {
+    "ClientId": "your-client-id-here",
+    "TenantId": "your-tenant-id",
+    "ClientCredentials": [
+      {
+        "SourceType": "ClientSecret",
+        "ClientSecret": "your-client-secret-here"
+      }
+    ]
+  }
+}
+```
+
+## User Assigned Managed Identity
+
+Passwordless authentication using Azure managed identities - no secrets to rotate or manage.
+
+### Setup
+
+First, complete the [User Assigned Managed Identity Setup](/teams/app-authentication/user-managed-identity) in Azure Portal or Azure CLI.
+
+### Configuration
+
+**SDK 2.0 (Legacy):**
+
+:::note
+The environment file approach is not yet supported for C#. You need to configure authentication programmatically in your code.
+:::
+
+In your `Program.cs`, replace the initialization:
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+builder.AddTeams();
+```
+with the following code to enable User Assigned Managed Identity authentication:
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+Func<string[], string?, Task> createTokenFactory = async (string[] scopes, string? tenantId) =>
+{
+    var clientId = Environment.GetEnvironmentVariable("CLIENT_ID");
+    var managedIdentityCredential = new ManagedIdentityCredential(clientId);
+    var tokenRequestContext = new TokenRequestContext(scopes, tenantId: tenantId);
+    var accessToken = await managedIdentityCredential.GetTokenAsync(tokenRequestContext);
+
+    return new TokenResponse
+    {
+        TokenType = "Bearer",
+        AccessToken = accessToken.Token,
+    };
+};
+
+var appBuilder = App.Builder()
+    .AddCredentials(new TokenCredentials(
+        Environment.GetEnvironmentVariable("CLIENT_ID") ?? string.Empty,
+        async (tenantId, scopes) =>
+        {
+            return await createTokenFactory(scopes, tenantId);
+        }
+    ));
+
+builder.AddTeams(appBuilder);
+```
+
+The `createTokenFactory` function provides a method to retrieve access tokens from Azure on demand, and `TokenCredentials` passes this method to the app.
+
+Set the following environment variables:
+
+- `CLIENT_ID`: Your Application (client) ID
+
+**SDK 2.1 (current):**
+
+Your application should automatically use User Assigned Managed Identity authentication when you provide the `ClientId` without a `ClientSecret`.
+
+Configure the following settings in `appsettings.json`:
+
+```json title="appsettings.json"
+{
+  "AzureAd": {
+    "ClientId": "your-client-id-here",
+    "TenantId": "your-tenant-id"
+  }
+}
+```
+
+## Federated Identity Credentials
+
+Advanced identity federation allowing you to assign managed identities directly to your App Registration.
+
+### Setup
+
+First, complete the [Federated Identity Credentials Setup](/teams/app-authentication/federated-identity-credentials) in Azure Portal or Azure CLI.
+
+### Configuration
+
+**SDK 2.0 (Legacy):**
+
+:::note
+The environment file approach is not yet supported for C#. You need to configure authentication programmatically in your code.
+:::
+
+In your `Program.cs`, replace the initialization:
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+builder.AddTeams();
+```
+with the following code to enable User Assigned Managed Identity authentication:
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+Func<string[], string?, Task> createTokenFactory = async (string[] scopes, string? tenantId) =>
+{
+    var managedIdentityClientIdRaw = Environment.GetEnvironmentVariable("MANAGED_IDENTITY_CLIENT_ID");
+    var managedIdentityClientId =
+        string.IsNullOrWhiteSpace(managedIdentityClientIdRaw) ||
+        string.Equals(managedIdentityClientIdRaw, "system", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : managedIdentityClientIdRaw;
+    var managedIdentityCredential = new ManagedIdentityCredential(managedIdentityClientId);
+    var tokenRequestContext = new TokenRequestContext(scopes, tenantId: tenantId);
+    var accessToken = await managedIdentityCredential.GetTokenAsync(tokenRequestContext);
+
+    return new TokenResponse
+    {
+        TokenType = "Bearer",
+        AccessToken = accessToken.Token,
+    };
+};
+
+var appBuilder = App.Builder()
+    .AddCredentials(new TokenCredentials(
+        Environment.GetEnvironmentVariable("CLIENT_ID") ?? string.Empty,
+        async (tenantId, scopes) => await createTokenFactory(scopes, tenantId)));
+
+builder.AddTeams(appBuilder);
+```
+
+The `createTokenFactory` function provides a method to retrieve access tokens from Azure on demand, and `TokenCredentials` passes this method to the app.
+
+Set the following environment variables:
+
+- `CLIENT_ID`: Your Application (client) ID
+- `MANAGED_IDENTITY_CLIENT_ID`: The managed identity client ID, or `system` for system-assigned identity
+- `TENANT_ID`: The tenant id where your bot is registered
+
+**SDK 2.1 (current):**
+
+Depending on the type of managed identity you select, configure the corresponding settings in `appsettings.json`.
+
+```json title="appsettings.json"
+{
+  "AzureAd": {
+    "ClientId": "your-app-client-id-here",
+    "TenantId": "your-tenant-id",
+    "ClientCredentials": [
+      {
+        "SourceType": "SignedAssertionFromManagedIdentity",
+        "ManagedIdentityClientId": "your-managed-identity-client-id-here"
+      }
+    ]
+  }
+}
+```
+
+For system-assigned identity, omit `ManagedIdentityClientId`:
+
+```json title="appsettings.json"
+{
+  "AzureAd": {
+    "ClientId": "your-app-client-id-here",
+    "TenantId": "your-tenant-id",
+    "ClientCredentials": [
+      {
+        "SourceType": "SignedAssertionFromManagedIdentity"
+      }
+    }
+  }
+}
+```
+
+## Troubleshooting
+
+If you encounter authentication errors, see the [Authentication Troubleshooting](/teams/app-authentication/troubleshooting) guide for common issues and solutions.
+
+---
+
+## CAT: get-started
+
+### PAGE: Quickstart: Register your app
+
+# Quickstart: Register your app
+
+Register a Teams app and its bot infrastructure with the [Teams Developer CLI](/cli/) (`@microsoft/teams.cli`). At the end you'll have a running agent installed in Teams.
+
+If you don't have an agent yet, step 3 scaffolds one using the Teams SDK. If you already have a server, skip step 3 and pass your endpoint to step 4.
+
+:::tip Let your AI assistant do this for you
+Install the [`teams-dev` skill](#agent-skills) in Claude Code, GitHub Copilot, Cursor, or VS Code, then say _"create a Teams bot"_ — your assistant runs every step on this page for you, including the tunnel setup and sideload link.
+:::
+
+## Prerequisites
+
+- Node.js 22.12 or later
+- An M365 account with **custom app upload (sideloading) enabled** on the tenant. Step 2 will check this.
+- A public HTTPS tunnel pointing at your local server (e.g. [DevTunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview), [ngrok](https://ngrok.com/)). Start it before step 4 — see [Local Tunnels](/developer-tools/local-tunnels) if you need setup steps.
+
+## 1. Install the CLI
+
+```bash
+npm install -g @microsoft/teams.cli
+teams --version
+```
+
+## 2. Log in
+
+```bash
+teams login
+teams status
+```
+
+`teams status` should show `Sideloading: enabled`. If it shows `disabled`, your tenant admin needs to enable [custom app upload](https://learn.microsoft.com/en-us/microsoftteams/teams-custom-app-policies-and-settings) before you can install your bot.
+
+## 3. Scaffold a project
+
+Skip this step if you're bringing your own server endpoint.
+
+**TypeScript:**
+
+```bash
+teams project new typescript echo-bot
+cd echo-bot
+```
+
+**C#:**
+
+```bash
+teams project new csharp echo-bot
+cd Echo.Bot/Echo.Bot
+```
+
+**Python:**
+
+```bash
+teams project new python echo-bot
+cd echo-bot
+```
+
+The default template is `echo`. Run `teams project new <language> --help` to see other templates available for your language.
+
+## 4. Register bot infrastructure
+
+:::note Start your tunnel first
+Teams must reach your bot over **public HTTPS** — your `localhost` port isn't reachable from Teams' servers. Before running the command below, start a tunnel (e.g. [DevTunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview) or [ngrok](https://ngrok.com/)) and r

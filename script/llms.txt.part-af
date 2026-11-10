@@ -1,0 +1,781 @@
+ new TaskInfo
+    {
+        Title = "Simple Form Dialog",
+        Card = new Attachment
+        {
+            ContentType = new ContentType("application/vnd.microsoft.card.adaptive"),
+            Content = dialogCard
+        }
+    };
+
+    return new Microsoft.Teams.Api.TaskModules.Response(
+        new Microsoft.Teams.Api.TaskModules.ContinueTask(taskInfo));
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Apps.Schema;
+using Microsoft.Teams.Apps.TaskModules;
+using Microsoft.Teams.Cards;
+
+//...
+
+private static TaskModuleResponse CreateSimpleFormDialog()
+{
+    var choices = new List
+    {
+        new Choice { Title = "Option 1", Value = "opt1" },
+        new Choice { Title = "Option 2", Value = "opt2" },
+        new Choice { Title = "Option 3", Value = "opt3" }
+    };
+
+    var dialogCard = new AdaptiveCard
+    {
+        Body = new List
+        {
+            new TextBlock("This is a simple form")
+            {
+                Size = TextSize.Large,
+                Weight = TextWeight.Bolder
+            },
+            new TextInput
+            {
+                Id = "name",
+                Label = "Name",
+                Placeholder = "Enter your name",
+                IsRequired = true
+            },
+            new ChoiceSetInput
+            {
+                Id = "preference",
+                Label = "Select your preference",
+                Choices = choices,
+                Style = StyleEnum.Compact
+            }
+        },
+        Actions = new List
+        {
+            new SubmitAction
+            {
+                Title = "Submit",
+                Data = new { submissiondialogtype = "simple_form" }
+            }
+        }
+    };
+
+    TeamsAttachment taskModuleCardResponse = TeamsAttachment.CreateBuilder()
+        .WithAdaptiveCard(JsonSerializer.SerializeToElement(dialogCard))
+        .Build();
+
+    return TaskModuleResponse.CreateBuilder()
+        .WithType(TaskModuleResponseTypes.Continue)
+        .WithTitle("Simple Form Dialog")
+        .WithHeight("medium")
+        .WithWidth("medium")
+        .WithCard(taskModuleCardResponse)
+        .Build();
+}
+```
+
+:::info
+The action type for submitting a dialog must be `Action.Submit`. This is a requirement of the Teams client. If you use a different action type, the dialog will not be submitted and the agent will not receive the submission event.
+:::
+
+### Rendering A Webpage
+
+You can render a webpage in a dialog as well. There are some security requirements to be aware of:
+
+1. The webpage must be hosted on a domain that is allow-listed as `validDomains` in the Teams app [manifest](/teams/manifest) for the agent
+2. The webpage must also host the [teams-js client library](https://www.npmjs.com/package/@microsoft/teams-js). The reason for this is that for security purposes, the Teams client will not render arbitrary webpages. As such, the webpage must explicitly opt-in to being rendered in the Teams client. Setting up the teams-js client library handles this for you.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using Microsoft.Teams.Api.TaskModules;
+using Microsoft.Teams.Common;
+
+//...
+
+private static Microsoft.Teams.Api.TaskModules.Response CreateWebpageDialog(IConfiguration configuration, ILogger log)
+{
+    var botEndpoint = configuration["BotEndpoint"];
+    if (string.IsNullOrEmpty(botEndpoint))
+    {
+        botEndpoint = "http://localhost:3978"; // Fallback for local development
+    }
+
+    var taskInfo = new TaskInfo
+    {
+        Title = "Webpage Dialog",
+        Width = new Union<int, Size>(1000),
+        Height = new Union<int, Size>(800),
+        // Here we are using a webpage that is hosted in the same
+        // server as the agent. This server needs to be publicly accessible,
+        // needs to set up teams.js client library (https://www.npmjs.com/package/@microsoft/teams-js)
+        // and needs to be registered in the manifest.
+        Url = $"{botEndpoint}/tabs/dialog-form"
+    };
+
+    return new Microsoft.Teams.Api.TaskModules.Response(
+        new Microsoft.Teams.Api.TaskModules.ContinueTask(taskInfo));
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using Microsoft.Teams.Apps.Schema;
+using Microsoft.Teams.Apps.TaskModules;
+
+//...
+
+private static InvokeResponse CreateWebpageDialog(IConfiguration configuration)
+{
+    var botEndpoint = configuration["BotEndpoint"] ?? "http://localhost:3978";
+
+    // The TaskModuleResponse builder supports card-based dialogs only.
+    // For URL-based dialogs, construct the response manually.
+    // This server needs to be publicly accessible, set up the teams.js client library
+    // (https://www.npmjs.com/package/@microsoft/teams-js), and be registered in the manifest.
+    return new InvokeResponse(200, new TaskModuleResponse
+    {
+        Task = new Microsoft.Teams.Apps.TaskModules.Response
+        {
+            Type = TaskModuleResponseTypes.Continue,
+            Value = new
+            {
+                title = "Webpage Dialog",
+                url = $"{botEndpoint}/tabs/dialog-form",
+                height = 800,
+                width = 1000
+            }
+        }
+    });
+}
+```
+
+### Setting up Embedded Web Content
+
+To serve web content for dialogs, you can use the `AddTab` functionality to embed HTML files as resources:
+
+```csharp
+// In Program.cs when building your app
+app.UseTeams();
+app.AddTab("dialog-form", "Web/dialog-form");
+
+// Configure project file to embed web resources
+// In .csproj:
+// true
+// 
+// 
+```
+
+---
+
+### PAGE: File and Image Handling
+
+# File and Image Handling
+
+This section covers how your app receives files and inline images and reads their bytes, and how it sends images back.
+
+:::info[Preview]
+The high-level file API is being rolled out incrementally. Today it supports **receiving** files attached to messages via the TypeScript, Python, and C# SDKs: in personal (1:1) chats for every agent, and soon in group chats and channels for agentic users. Receiving inline images through the same API is planned for version 2.2.0.
+:::
+
+## Files vs. attachments
+
+In personal scope, `Activity.Attachments` carries every non-text part: files the user attached, inline images, Adaptive Cards, `@mentions`, link previews, and other content the client or the platform adds. A **file** is the specific subset of attachments that describes a document the user attached, one whose `ContentType` is `file.download.info`.
+
+The `context.Files` accessor is the attached-file view over that raw array. It maps each attached file and inline image to a lazy handle you can download from, and skips everything else. The original `Activity.Attachments` array is always available when you need the raw payload or a non-file attachment.
+
+An **inline image** is an image attachment with an authenticated download URL, commonly paired with an HTML attachment that describes where the image appeared in the composed message. Inline images are listed by the high-level file API alongside attached files, marked with an inline image attachment style.
+
+Sending works similarly: an image you send is an attachment whose content type is an image MIME type, which is why it renders inline rather than arriving as a document.
+
+## In this section
+
+- **[Receiving Files](#receiving-files)** — read files a user attaches to a message, stream or download their bytes, and handle unsupported scopes, expired links, and agentic users.
+- **[Receiving Inline Images](#receiving-inline-images)** — list images pasted into a message, download their bytes, and handle image formats that cannot be downloaded.
+- **[Sending Inline Images](#sending-inline-images)** — send an image that renders directly in the conversation, from a hosted URL or as base64-encoded bytes, within the platform's size and format limits.
+
+## Resources
+
+- [Files in Teams bots](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/bots-filesv4)
+- [Picture messages](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/conversations/conversation-messages#use-picture-messages)
+
+---
+
+### PAGE: HTML Widgets
+
+# HTML Widgets
+
+HTML Widgets let your app render rich, interactive HTML inside a Teams message.
+A widget is an [MCP Apps (ext-apps)](https://github.com/modelcontextprotocol/ext-apps) surface that the Teams client renders in a sandboxed iframe.
+The widget can call tools on your app, send messages back, request display mode changes, open links, and contribute content to the model context for future turns.
+
+The SDK helps you send a widget and handle its tool calls, but it does not run any code inside the widget.
+Your widget's own JavaScript must complete the MCP Apps handshake and report its size, or it will not display correctly.
+
+:::info What your widget must do
+- **Send `ui/initialize`, then `ui/notifications/initialized`.** Do not send other requests until the `ui/initialize` response arrives.
+- **Report its size with `ui/notifications/size-changed`.** Without a report the host leaves the widget at about 150px tall.
+
+See [Your widget owns the handshake and sizing](#your-widget-owns-the-handshake-and-sizing).
+:::
+
+:::warning Preview
+HTML Widgets are in preview and the API surface may change. HTML Widgets are planned for public preview on 11/16.
+Every widget type and helper is guarded by the `ExperimentalTeamsHtmlWidget` compiler diagnostic, so you opt in explicitly to use them.
+:::
+
+:::warning Message export
+There is a gap in the export APIs that prevents widget content from being exported. If your organization determines this is a problem, you can disable bots that may send widgets.
+:::
+
+## How it works
+
+A widget travels inside a normal message.
+The app sends a message with `textFormat: 'extendedmarkdown'` whose text contains a fenced `html-widget` code block holding a JSON payload:
+
+````text
+Here is your widget:
+
+```html-widget
+
+```
+````
+
+The Teams client parses that block and loads the widget HTML in a sandboxed iframe.
+The widget speaks the MCP Apps protocol to the client over `postMessage`, and from that point the widget and your app communicate through a small set of methods.
+
+## The widget payload
+
+Every widget is described by a payload with the following fields:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `type` | yes | The widget type identifier. Currently only `widget/mcp-ui` is supported. The SDK builders default this for you. |
+| `name` | yes | The display name of the widget. |
+| `html` | yes | The HTML content that makes up the widget. |
+| `domain` | yes | A valid domain URL applied to sandbox metadata. It does not need to resolve or serve content, but must be non-empty. This is informational metadata, not a verified identity claim. |
+| `description` | no | A description of the widget. |
+| `securityPolicy` | no | Allowed origins for network requests, resources, frames, and base URIs. See [Security policy](#security-policy). |
+| `toolInput` | no | Data passed to the widget as initial context. The host delivers it after the handshake in a `ui/notifications/tool-input` notification, as `params.arguments`. |
+| `toolOutput` | no | Data the tool produced alongside the widget. The host delivers it after the handshake in a `ui/notifications/tool-result` notification, with the `content`, `structuredContent`, and `isError` fields as `params`. |
+| `permissions` | no | Capabilities the widget requests from the host (camera, microphone, geolocation, clipboard write). |
+| `mcpUrl` | no | The URL of the MCP server that produced the widget. The Teams client combines it with the owner id to derive the widget's hosting origin, so it is not itself the origin. A widget produced by an MCP server must set it to that server's URL to get its own hosting scope. |
+| `correlationId` | no | A correlation vector for the widget. The Teams client returns it to your app on tool calls from the widget. |
+
+## Your widget owns the handshake and sizing
+
+The SDK sends your HTML exactly as you author it. It does not add any script to it.
+Your widget must do two things itself:
+
+- **Complete the handshake.** Send a `ui/initialize` request to the host with `protocolVersion` (`2026-01-26`), `appInfo` (`name` and `version`), and `appCapabilities`. Wait for the response before sending any other request, because a request sent earlier gets an empty result. When the response arrives, send `ui/notifications/initialized`. The `ui/initialize` result carries `protocolVersion`, `hostCapabilities`, `hostInfo`, and `hostContext` (such as the theme, locale, and display modes). If the response is an error, the handshake failed and the widget must not continue.
+- **Report its size.** Report its height with `ui/notifications/size-changed` after the handshake and whenever its content changes. Without a size report the host leaves the widget at about 150px tall. Observe the widget's root element with a single `ResizeObserver` and report `getBoundingClientRect().height` as is. Rounding the value can leave a gap or clip the content by a pixel.
+
+Messages travel as JSON-RPC 2.0 objects over `window.parent.postMessage`. A request carries an `id` and gets a response with the same `id`. A notification has no `id`.
+
+```js
+const root = document.getElementById('root');
+const post = (message) => window.parent.postMessage({ jsonrpc: '2.0', ...message }, '*');
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window.parent) return;
+  const data = event.data;
+  if (data?.id === 'init') {
+    if (data.error) return console.error('Widget handshake failed', data.error);
+    post({ method: 'ui/notifications/initialized', params: {} });
+    new ResizeObserver(() =>
+      post({ method: 'ui/notifications/size-changed', params: { height: root.getBoundingClientRect().height } })
+    ).observe(root);
+  }
+  if (data?.method === 'ui/notifications/tool-input') console.log(data.params.arguments);
+  if (data?.method === 'ui/notifications/tool-result') console.log(data.params.structuredContent);
+});
+
+post({
+  id: 'init',
+  method: 'ui/initialize',
+  params: { protocolVersion: '2026-01-26', appInfo: { name: 'my-widget', version: '1.0.0' }, appCapabilities: {} },
+});
+```
+
+A widget can ask the host to change its display mode by sending a `ui/request-display-mode` request with ` "mode": "fullscreen" `.
+
+## What the SDK provides
+
+The SDK does not change the wire contract.
+Everything a widget needs could be assembled by hand.
+Instead the SDK ships a small set of helpers so you never have to build the fenced code block, escape the JSON, or hand-parse invoke payloads.
+The SDK does not run inside the widget, so it does not perform the `ui/initialize` handshake, report the widget's size, or deliver `toolInput` and `toolOutput`. The widget does the first two, and the host sends the last two as `ui/notifications/tool-input` and `ui/notifications/tool-result` after the handshake.
+
+- **Build helpers**: `HtmlWidgetHelpers.BuildHtmlWidgetMessage` and `HtmlWidgetHelpers.BuildHtmlWidgetMarkdown` turn a payload into a ready-to-send message (or the raw markdown string) with the correct `html-widget` fence and `extendedmarkdown` text format. See [Sending widgets](#sending-widgets).
+- **A typed tool-call handler**: the `OnWidgetCallTool` handler receives `htmlwidget/calltool` invokes when a widget calls one of your tools, gives you the typed tool name and arguments, and lets you return a typed result. See [Handling tool calls](#handling-tool-calls).
+- **Security helpers**: `HtmlWidgetHelpers.ValidateSecurityPolicy` audits that external references in your HTML are covered by your declared security policy. See [Security policy](#security-policy).
+- **A model-context helper**: `HtmlWidgetHelpers.TryGetWidgetModelContext` parses a widget's `ui/update-model-context` request off an incoming message activity. See [Updating model context](#updating-model-context).
+
+For how failures surface at each stage, from sending to rendering, see [Error handling](#error-handling).
+
+## Resources
+
+- [MCP Apps (ext-apps) specification](https://github.com/modelcontextprotocol/ext-apps)
+- [Model Context Protocol](https://modelcontextprotocol.io)
+
+---
+
+### PAGE: Set up Agentic Users
+
+# Set up Agentic Users
+
+## 1. Set up an AI teammate
+
+Follow [Set up an agent blueprint](https://learn.microsoft.com/microsoft-agent-365/developer/registration) and select the AI teammate setup.
+
+To run a config-free setup, provide an agent name:
+
+```powershell
+a365 setup all `
+  --agent-name "MyAgent" `
+  --aiteammate
+```
+
+## 2. Configure Teams SDK
+
+Configure Teams SDK with the blueprint identity. It uses the same authentication settings as a standard Teams app, and the blueprint ID is the application (client) ID.
+
+| Agent 365 value      | App authentication setting                                                       |
+| -------------------- | -------------------------------------------------------------------------------- |
+| Blueprint ID         | Application (client) ID (`CLIENT_ID`)                                            |
+| Blueprint credential | Client secret, user-assigned managed identity, or federated identity credentials |
+| Tenant ID            | Tenant ID (`TENANT_ID`)                                                          |
+
+Configure these values as described in App Authentication.
+
+## 3. Deploy and register the messaging endpoint
+
+Deploy your Teams SDK app to a publicly accessible host, then [register its messaging endpoint](https://learn.microsoft.com/microsoft-agent-365/developer/agent-messaging-endpoint), typically `https://<host>/api/messages`.
+
+```powershell
+a365 setup blueprint --endpoint-only `
+  --messaging-endpoint "https://<host>/api/messages"
+```
+
+## 4. Publish and create an instance
+
+1. Run `a365 publish` to create the agent package.
+2. Follow [Publish the agent](https://learn.microsoft.com/microsoft-agent-365/developer/publish) to upload the package to the Microsoft 365 admin center.
+3. [Create an agent instance](https://learn.microsoft.com/microsoft-agent-365/developer/create-instance).
+
+After the instance is approved, its Agentic User can communicate through the deployed Teams SDK app.
+
+---
+
+### PAGE: Static Pages
+
+# Static Pages
+
+The `App` class lets you host web apps in the agent. This is useful for an efficient inner loop — you can build, deploy, and sideload both an agent and a Tab app inside Teams in a single step. It's also useful in production, since it makes it straightforward to host a simple experience such as an agent configuration page or a Dialog.
+
+To host a static tab web app, call the SDK 2.0 `app.AddTab()` helper or SDK 2.1 ASP.NET route mapping with `app.MapGet(...)` function and provide an app name and a path to a folder containing an `index.html` file to be served up.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.AddTab("myApp", "Web/bin");
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using Microsoft.AspNetCore.StaticFiles;
+
+FileExtensionContentTypeProvider contentTypes = new();
+
+app.MapGet("/tabs/myApp", () =>
+{
+    string index = Path.Combine(Directory.GetCurrentDirectory(), "Web", "bin", "index.html");
+    contentTypes.TryGetContentType(index, out string? ct);
+    return Results.File(File.OpenRead(index), ct ?? "text/html");
+});
+
+app.MapGet("/tabs/myApp/{*path}", (string? path) =>
+{
+    string root = Path.Combine(Directory.GetCurrentDirectory(), "Web", "bin");
+    string full = Path.Combine(root, path ?? "index.html");
+    contentTypes.TryGetContentType(full, out string? ct);
+    return Results.File(File.OpenRead(full), ct ?? "text/html");
+});
+```
+
+This registers a route that is hosted at `http://localhost:PORT/tabs/myApp` or `https://BOT_DOMAIN/tabs/myApp`.
+
+## Additional resources
+
+- For more details about Tab apps, see the [Tabs](#tabs) in-depth guide.
+- For an example of hosting a Dialog, see the [Creating Dialogs](#creating-dialogs) in-depth guide.
+
+---
+
+### PAGE: Agentic Identity
+
+# Agentic Identity
+
+:::note Availability
+Agentic Identity support is available in Teams SDK v2.1 for C#.
+:::
+
+These guides show how to connect a Teams SDK app to an **Agentic User**—an AI teammate represented by its own Microsoft Entra user account.
+
+## Identity model
+
+An Agentic Blueprint defines the shared credentials and baseline permissions for a type of agent. One blueprint can be used to create multiple Agentic User instances.
+
+```mermaid
+flowchart LR
+  B[Agentic Blueprint ID<br/>shared credentials and permissions]
+  B --> U1[Agentic User instance A]
+  B --> U2[Agentic User instance B]
+```
+
+One blueprint can support multiple independently managed Agentic Users while the same Teams SDK app handles their messages.
+
+For background on blueprints, agent identities, and authentication modes, see [Agent 365 identity](https://learn.microsoft.com/microsoft-agent-365/developer/identity?view=o365-worldwide).
+
+The guides show how to:
+
+- Receive messages addressed to an Agentic User.
+- Reply with the correct Agentic User identity.
+- Send proactive messages with an explicit agent identity.
+- Handle Agentic User lifecycle events.
+- Add Agent 365 identity and correlation context to telemetry.
+
+---
+
+### PAGE: Dialogs
+
+# Dialogs
+
+Dialogs are a helpful paradigm in Teams which improve interactions between your agent and users. When dialogs are **invoked**, they pop open a window for a user in the Teams client. The content of the dialog can be supplied by the agent application.
+
+:::note
+In Teams client v1, dialogs were called task modules. They may occasionaly be used synonymously.
+:::
+
+## Key benefits
+
+1. Dialogs pop open for a user in the Teams client. This means in group-settings, dialog actions are not visible to other users in the channel, reducing clutter.
+
+2. Interactions like filling out complex forms, or multi-step forms where each step depends on the previous step are excellent use cases for dialogs.
+
+3. The content for the dialog can be hard-coded in, or fetched at runtime. This makes them extremely flexible and powerful.
+
+## Resources
+
+- [Task Modules](https://learn.microsoft.com/en-us/microsoftteams/platform/task-modules-and-cards/what-are-task-modules)
+- [Invoking Task Modules](https://learn.microsoft.com/en-us/microsoftteams/platform/task-modules-and-cards/task-modules/invoking-task-modules)
+
+---
+
+### PAGE: Enhance the Teams Experience
+
+# Enhance the Teams Experience
+
+:::warning[Our AI libraries are deprecated]
+The Teams SDK has deprecated its own AI libraries — the `@microsoft/teams.ai` packages (`ChatPrompt`, `Model`, and the older `@microsoft/teams.mcp` / `@microsoft/teams.a2a` plugins) — in favor of dedicated AI frameworks. Use the pattern shown in these guides instead: bring the OpenAI SDK (or any framework you like), and wire MCP and A2A directly into your Teams app.
+:::
+
+:::warning[SDK 2.0 AI libraries are deprecated]
+For .NET, implement AI enhancements with SDK 2.1 plus external model/agent frameworks. The Teams SDK provides the chat/activities surface; your AI stack provides reasoning/tool orchestration.
+:::
+
+You can enrich the agent output into a more Teams-native experience — adding structure, interactivity, and metadata on top of the generated text. This guide builds on the agent from [Build an agent in Teams](./build-agent).
+
+## Streaming
+
+Streaming delivers responses to Teams incrementally as they're generated, rather than waiting for the full reply to complete. Each chunk of text is appended to the stream as it arrives.
+
+```csharp
+TeamsStreamingWriter writer = TeamsStreamingWriter.CreateFromContext(context);
+await writer.SendInformativeUpdateAsync("Thinking…", cancellationToken);
+
+await foreach (ChatResponseUpdate update in _chatClient.GetStreamingResponseAsync(history, options, cancellationToken))
+{
+    if (!string.IsNullOrEmpty(update.Text))
+    {
+        await writer.AppendResponseAsync(update.Text, cancellationToken);
+    }
+}
+ await writer.FinalizeResponseAsync(cancellationToken: cancellationToken);
+```
+
+See [Streaming](#sending-messages) for the full story on how Teams renders chunks and the constraints on stream lifecycle.
+
+## AI-generated label
+
+Mark the message as system-generated so Teams clearly labels it as AI output.
+
+Mark the message as system-generated so Teams clearly labels it as AI output.
+
+```csharp
+MessageActivityInput reply = new MessageActivityInput().AddAIGenerated();
+await writer.FinalizeResponseAsync(msg, cancellationToken);
+```
+
+<img
+  src=StreamingImgUrl
+  alt="Animated screenshot of an agent reply streaming into a Teams chat token by token, with the 'AI generated' label on the message."
+  style={ width: '100%', maxWidth: 900 }
+/>
+
+## Feedback
+
+Enable built-in thumbs up/down controls on the reply and surface a custom feedback form when users respond.
+
+Enable built-in thumbs up/down controls on the reply and surface a custom feedback form when users respond.
+```csharp
+MessageActivityInput reply = new MessageActivityInput().AddAIGenerated().AddFeedback(FeedbackTypes.Custom);
+await writer.FinalizeResponseAsync(msg, cancellationToken);
+```
+
+See [Feedback](#feedback) for the full form-handling story — capturing the submission, persisting it, and following up with the user.
+
+## Clarification cards
+
+When the agent calls the `request_clarification` tool (from [Build an agent](./build-agent#adding-a-local-tool)), the reply is a card, not text. The model still produces a short wrap-up after the tool returns, so discard the streamed text and send only the card. Clearing the stream's accumulated text before emitting the card-only activity keeps the turn to a single clean reply.
+
+```csharp
+    private async Task RespondAsync(Context context, string userText, CancellationToken cancellationToken)
+        where TActivity : TeamsActivity
+    {
+        _ = context.Activity.Conversation?.Id
+            ?? throw new InvalidOperationException("Missing conversation ID.");
+
+        TeamsStreamingWriter writer = TeamsStreamingWriter.CreateFromContext(context);
+        RunResult result = await _agent.RunAsync(context.Activity.Conversation!.Id, userText, writer, cancellationToken);
+
+        MessageActivityInput msg = new MessageActivityInput();
+
+        if (result.PendingCards.Count > 0)
+        {
+            // Card-only reply (e.g. clarification). No text and no feedback — the card IS the question.
+            msg.WithText("")
+                .AddAttachment([.. result.PendingCards.Select(c =>
+                    TeamsAttachment.CreateBuilder().WithAdaptiveCard(c).Build())])
+                    .AddAIGenerated();
+        }
+        else
+        {
+            // normal reply: attach follow-ups, citations, feedback (below).
+            ...
+        }
+
+        await writer.FinalizeResponseAsync(msg, cancellationToken);
+    }
+```
+
+```csharp
+this.OnAdaptiveCardAction(async (context, cancellationToken) =>
+{
+    if (context.Activity.Value?.Action?.Verb == "clarification")
+    {
+        string choice = context.Activity.Value.Action.Data?["clarificationChoice"]?.ToString() ?? "";
+        await RespondAsync(context, choice, cancellationToken);
+    }
+    return InvokeResponse.Ok();
+});
+```
+
+The user's selection arrives as a fresh turn through the card-action route — the same code path as a normal message — so the agent picks up with full context.
+
+<img
+  src=ClarificationImgUrl
+  alt="Animated screenshot of the clarification flow: the user asks an ambiguous question, the bot replies with a choice card, the user picks an option, and the bot streams a grounded answer with an inline citation."
+  style={ width: '100%', maxWidth: 900 }
+/>
+
+## Suggested prompts
+
+Suggested prompts give the user one-click follow-up questions after a reply. In Teams they render as chips under the message; tapping one sends the value back as a normal user message, so the same message handler picks it up — no extra routing required.
+
+Rather than hard-coding them, generate two contextual follow-ups with a separate lightweight model call constrained to a strict JSON schema, then attach them as suggested actions.
+
+```csharp
+private const string FollowUpsPrompt = """
+    Produce 2 specific prompts the user might want to ask next.
+
+    Output format — read carefully:
+    Return ONLY a JSON object INSTANCE, like this:
+    {"prompt1": "How do I stream a reply?", "prompt2": "Show me an Adaptive Card example"}
+
+    Each prompt MUST:
+    - Be phrased in the first person, as the user would type.
+    - Stay under 8 words.
+
+    Pick based on the conversation:
+    - If recent turns have substantive content, drill into a concrete topic, API, or
+    concept that just came up.
+    - Otherwise (e.g. conversation just started, or the last turn is generic),
+    suggest prompts that showcase what you can help with based on the MCP tools available.
+    """;
+
+private async Task> GenerateFollowUpsAsync(
+    IReadOnlyList history,
+    CancellationToken cancellationToken)
+{
+    List messages =
+    [
+        .. history,
+        new ChatMessage(ChatRole.System, FollowUpsPrompt)
+    ];
+
+    ChatResponse response = await _chatClient.GetResponseAsync(
+        messages,
+        cancellationToken: cancellationToken);
+
+    if (!response.TryGetResult(out FollowUps? followUps) || followUps is null)
+    {
+        _logger.LogWarning("Follow-up generation did not return parseable JSON. Raw response: {Text}", response.Text);
+        return [];
+    }
+
+    return [
+        new SuggestedAction(ActionTypes.IMBack, followUps.Prompt1),
+        new SuggestedAction(ActionTypes.IMBack, followUps.Prompt2)
+    ];
+}
+```
+
+<img
+  src=SuggestedPromptsImgUrl
+  alt="Animated screenshot of suggested follow-up prompt chips appearing under an agent reply; tapping one sends it back as the next user message."
+  style={ width: '100%', maxWidth: 900 }
+/>
+
+## Citations
+
+Citations render as footnote-style references inline with the reply — `[1]`, `[2]`, etc. — surfacing the source title, abstract, and URL on hover. They originate from tool outputs, where the collector from [Grounding responses with citations](./build-agent#grounding-responses-with-citations) assigned each result a stable position.
+
+When building the final reply, attach only the citations whose position actually appears in the streamed text.
+
+```csharp
+result.Citations.AttachCitations(reply, result.FullText);
+
+public void AttachCitations(MessageActivityInput reply, string fullText)
+{
+    HashSet<int> used = [];
+    foreach (Match match in Regex.Matches(fullText, @"\[(\d+)\]"))
+    {
+        if (int.TryParse(match.Groups[1].Value, out int position))
+            used.Add(position);
+    }
+
+    foreach (CitationEntry citation in _citations.Values.Where(e => used.Contains(e.Position)))
+    {
+        reply.AddCitation(
+            citation.Position,
+            new CitationAppearance
+            {
+                Name = string.IsNullOrEmpty(citation.Title)
+                    ? $"Source {citation.Position}"
+                    : citation.Title[..Math.Min(80, citation.Title.Length)],
+                Abstract = string.IsNullOrEmpty(citation.Snippet)
+                    ? "No description available."
+                    : citation.Snippet,
+                Url = Uri.TryCreate(citation.Url, UriKind.Absolute, out Uri? uri) ? uri : null
+            });
+    }
+}
+```
+
+<img
+  src=CitationsImgUrl
+  alt="Animated screenshot showing a user hovering over a footnote citation in an agent response, with a pop-up showing explanatory text."
+  style={ width: '100%', maxWidth: 900 }
+/>
+
+## Sensitivity labels
+
+:::info[Coming Soon]
+Sensitivity labels are planned for the next SDK release, version 2.2.0.
+:::
+
+Sensitivity labels mark a message with a Microsoft Purview label, which Teams shows as a shield on the message with the label name on hover.
+
+Add a message-level label with `AddSensitivityLabel`, passing the label ID as `Id`, which is sent to Teams as `@id`. Calling it again replaces the previous label. To label an individual source, set `SensitivityUsageInfo` on the citation appearance.
+
+```csharp
+string labelId = "<purview-label-id>";
+
+MessageActivityInput reply = new MessageActivityInput()
+    .WithText("Here is the quarterly summary [1].")
+    .AddSensitivityLabel(new SensitivityUsageInfo { Id = labelId, Name = "Confidential" })
+    .AddCitation(1, new CitationAppearance
+    {
+        Name = "Quarterly report",
+        Abstract = "Revenue and forecast for the quarter.",
+        SensitivityUsageInfo = new SensitivityUsageInfo { Id = labelId, Name = "Confidential" }
+    });
+```
+
+- `Name` is optional but recommended. Teams shows it when it cannot resolve `@id`, for example for a deleted label, and shows no label at all if there is no `Name` either. Set it whenever you set `Description`, because Teams can reject a message whose label has a description but no name.
+- The sensitivity label, the AI-generated label, and citations are all written to the same root message entity, so an activity always carries exactly one root message entity, regardless of the order you call them in.
+
+### Where label IDs come from
+
+The label ID is the GUID of a Purview sensitivity label configured in your tenant. Get it from the Microsoft Purview portal or from your tenant admin.
+
+---
+
+### PAGE: Executing Actions
+
+# Executing Actions
+
+Adaptive Cards support interactive elements through **actions**—buttons, links, and input submission triggers that respond to user interaction.
+You can use these to collect form input, trigger workflows, show task modules, open URLs, and more.
+
+## Action Types
+
+The Teams SDK supports several action types for different interaction patterns:
+
+| Action Type               | Purpose                | Description                                                                  |
+| ------------------------- | ---------------------- | ---------------------------------------------------------------------------- |
+| `Action.Execute`          | Server‑side processing | Send data to your bot for processing. Best for forms & multi‑step workflows. |
+| `Action.Submit`           | Simple data submission | Legacy action type. Prefer `Execute` for new projects.                       |
+| `Action.OpenUrl`          | External navigation    | Open a URL in the user's browser.                                            |
+| `Action.ShowCard`         | Progressive disclosure | Display a nested card when clicked.                                          |
+| `Action.ToggleVisibility` | UI state management    | Show/hide card elements dynamically.                                         |
+
+:::info
+For complete reference, see the [official documentation](https://adaptivecards.microsoft.com/?topic=Action.Execute).
+:::
+
+## Creating Actions with the SDK
+
+### Single Actions
+
+The SDK provides builder helpers that abstract the underlying JSON. For example:
+
+```csharp
+using Microsoft.Teams.Cards;
+
+var action = new ExecuteAction
+{
+    Title = "Submit Feedback",
+    Data = new Union<string, SubmitActionData>(new SubmitActionData
+    {
+        NonSchemaProperties = new Dictionary<string, object?>
+        {
+            { "action", "submit_feedback" }
+        }
+    }),
+    AssociatedInputs = AssociatedInputs.Auto
+};
+```
+
+### Action Sets
+
+Group actions together using `Acti

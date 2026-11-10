@@ -1,0 +1,902 @@
+widget may set for its document base URI. |
+
+Attach the policy to the payload you send. When you omit `securityPolicy`, the SDK applies a restrictive default that allows only same-origin and `data:` resources.
+
+```csharp
+using Microsoft.Teams.Apps.HtmlWidget;
+
+// Attach a security policy to the payload. The build helper carries it through
+// to the widget block; omit it and the SDK applies a restrictive default.
+var message = HtmlWidgetHelpers.BuildHtmlWidgetMessage(
+    new HtmlWidgetPayload
+    {
+        Name = "Chart Widget",
+        Html = "<div id=\"chart\"></div>",
+        Domain = "https://teams.microsoft.com",
+        SecurityPolicy = new HtmlWidgetSecurityPolicy
+        {
+            ConnectDomains = ["https://api.contoso.com"],
+            ResourceDomains = ["'self'", "data:", "https://cdn.contoso.com"],
+            FrameDomains = [],
+            BaseUriDomains = [],
+        },
+    });
+
+await context.SendAsync(message, cancellationToken);
+```
+
+## Validating a policy
+
+The helper `HtmlWidgetHelpers.ValidateSecurityPolicy` scans your HTML for external references and returns a warning for any origin that is not covered by the appropriate policy field.
+This is a development-time audit tool, not a security boundary; the browser's CSP enforcement is the real protection.
+Run it while developing to catch a missing `connectDomains` or `resourceDomains` entry before you ship, so the widget does not silently fail to load a font or reach an API.
+
+Call it with your HTML and the policy you intend to send behind a development-only flag so it never runs in production. It returns a collection of warnings; an empty result means every external reference in that HTML is covered. It does not cover resources that those references load in turn, such as the font files a linked stylesheet requests.
+
+```csharp
+using Microsoft.Teams.Apps.HtmlWidget;
+
+var html =
+    "<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Roboto\">" +
+    "<div style=\"font-family: Roboto, sans-serif;\">Validation demo</div>";
+
+var policy = new HtmlWidgetSecurityPolicy
+{
+    ConnectDomains = [],
+    ResourceDomains = ["'self'", "data:"],
+    FrameDomains = [],
+    BaseUriDomains = [],
+};
+
+// Run the audit only in development so it never executes in production.
+var isDevelopment = builder.Environment.IsDevelopment();
+if (isDevelopment)
+{
+    foreach (var w in HtmlWidgetHelpers.ValidateSecurityPolicy(html, policy))
+    {
+        Console.WriteLine($"{w.Source}: {w.Url} is not in {w.PolicyField}");
+    }
+}
+
+// In development the audit above would warn that this HTML loads the Roboto
+// stylesheet from fonts.googleapis.com, so you would add that origin to ResourceDomains.
+// The audit scans only the HTML you pass it and cannot see inside the stylesheet,
+// so it does not report the font files that stylesheet loads from fonts.gstatic.com.
+// Add that origin to ResourceDomains yourself.
+```
+
+Each warning tells you the offending URL, where it appeared in the HTML, and which policy field it belongs in, so you can correct the policy before sending.
+
+---
+
+### PAGE: Sending Inline Images
+
+# Sending Inline Images
+
+Your agent can send an image that renders directly in the conversation, beside the message text, instead of arriving as a document the user has to open. Teams calls this an inline image. It is the outbound counterpart to [Receiving Files](#receiving-files): receiving gives you a lazy handle you pull bytes from, while sending means putting the image on the message before it goes out.
+
+An inline image travels as an attachment on the outgoing message activity. Two fields do the work: `ContentType` declares an image MIME type, which is what tells Teams to render the attachment as a picture rather than list it as a file, and `ContentUrl` carries the image itself in one of two forms:
+
+- **A hosted URL**, a reachable `https://` link the client fetches. Use this whenever the image already lives somewhere, and for anything that is not small.
+- **A base64 data URI**, the bytes embedded in the message as `data:image/png;base64,...`. Use this when the bytes only exist inside your process, such as a chart you just rendered, and you have nowhere to host them.
+
+Sending an inline image does not upload anything to OneDrive or SharePoint. The image is part of the message rather than a stored document, so it does not appear in the conversation's **Files** tab.
+
+:::info[Preview]
+Unlike [receiving files](#receiving-files), which a traditional bot can do only in personal (1:1) chats, sending is not scope-restricted: the same call works in personal chats, group chats, and channels.
+:::
+
+Sending an image needs no Microsoft Graph permission and no user sign-in. The message goes out under your app's own identity and is authorized by your app being in the conversation, exactly like sending text.
+
+## Image limits
+
+Teams renders inline images within fixed platform limits. Images can be up to **1024x1024 pixels** and **1 MB**, in **PNG**, **JPEG**, or **GIF** format. Animated GIFs are not supported. No validation is performed on MIME type, dimensions, or size of an outgoing attachment, so an image outside these bounds may send successfully but fail to render on the client.
+
+:::warning
+Base64 encoding inflates the bytes by roughly a third, and unlike a hosted URL the encoded string travels inside the message payload itself rather than being fetched separately. The practical ceiling for an inline data URI is therefore well below the 1 MB image limit. Keep embedded images small (icons, thumbnails, simple charts) and prefer a hosted URL for anything larger.
+:::
+
+## Send an image from a hosted URL
+
+Build an attachment whose `ContentUrl` is a link the Teams client can reach, and add it to the message you send:
+
+```csharp
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Schema;
+
+teamsApp.OnMessage(async (context, cancellationToken) =>
+{
+    TeamsAttachment image = TeamsAttachment.CreateBuilder()
+        .WithContentType(new AttachmentContentType("image/png"))
+        .WithContentUrl(new Uri("https://contoso.com/charts/weekly.png"))
+        .WithName("weekly.png")
+        .Build();
+
+    await context.SendAsync(
+        new MessageActivityInput()
+            .WithText("Here is the latest chart:")
+            .AddAttachment(image),
+        cancellationToken);
+});
+```
+
+`AttachmentContentTypes` exposes constants for the card content types only, so an image type is constructed directly: `new AttachmentContentType("image/png")`.
+
+The URL must be reachable by the client without your agent's credentials. A link behind a login, or one that only resolves inside your network, renders as a broken image.
+
+## Send image bytes inline
+
+When the bytes only exist in memory or on your agent's disk, encode them as base64 and send them as a data URI. The MIME type appears twice: once in the attachment's content type, and once inside the data URI. Keep them consistent with each other and with the actual bytes:
+
+```csharp
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Schema;
+
+teamsApp.OnMessage(async (context, cancellationToken) =>
+{
+    byte[] bytes = await File.ReadAllBytesAsync("./charts/weekly.png", cancellationToken);
+    string dataUri = $"data:image/png;base64,{Convert.ToBase64String(bytes)}";
+
+    TeamsAttachment image = TeamsAttachment.CreateBuilder()
+        .WithContentType(new AttachmentContentType("image/png"))
+        .WithContentUrl(new Uri(dataUri))
+        .WithName("weekly.png")
+        .Build();
+
+    await context.SendAsync(
+        new MessageActivityInput()
+            .WithText("Here is the latest chart:")
+            .AddAttachment(image),
+        cancellationToken);
+});
+```
+
+:::note
+`ContentUrl` is a `Uri`, not a `string`, so a data URI has to be wrapped in `new Uri(...)`. `data:` is a scheme `Uri` understands, and the base64 payload survives the round trip unchanged, including its `+`, `/`, and `=` characters.
+:::
+
+## Position an image inside the text
+
+The paths above place the image alongside the message rather than at a chosen point in it. To control placement, write the message body as HTML and set the text format to `xml`. Each image renders exactly where its `<img>` tag sits:
+
+```csharp
+using Microsoft.Teams.Apps;
+
+teamsApp.OnMessage(async (context, cancellationToken) =>
+{
+    string encoded = Convert.ToBase64String(
+        await File.ReadAllBytesAsync("charts/weekly.png", cancellationToken));
+
+    await context.SendAsync(
+        new MessageActivityInput()
+            .WithText($"<div>Revenue is up.<img src=\"data:image/png;base64,{encoded}\"/>Questions?</div>")
+            .WithTextFormat(TextFormats.Xml),
+        cancellationToken);
+});
+```
+
+The `xml` form also lets you size each image, with `height` and `width` attributes on the tag. A Markdown image gives you neither placement nor sizing and renders at a default 256x256, so `<img>` is the only form that controls either.
+
+Two constraints apply to this path only:
+
+- **Base64 only.** Only `<img>` tags whose `src` is a base64 data URI are uploaded and rewritten for you. An `https://` source in `xml` text is not, so use the hosted-URL attachment above for images you host yourself.
+- **The payload ceiling still applies**, and more sharply: every embedded image counts against the same message budget as your text. Exceeding the platform's per-message image limit rejects the **whole message** rather than dropping the extra images.
+
+:::warning[Restricted clouds]
+Agents do not support sending and receiving **files** in GCC High, DoD, and Teams operated by 21Vianet. In those environments a base64 image attachment is the only way to get an image into a message. See [Send and receive files](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/bots-filesv4).
+:::
+
+## Attachment fields
+
+An image attachment uses a small subset of the attachment shape:
+
+| Property | Description |
+|---|---|
+| `ContentType` | Required. The image's MIME type (`image/png`, `image/jpeg`, or `image/gif`), as an `AttachmentContentType`. This is what makes Teams render the attachment as a picture, so it has to match the actual bytes. |
+| `ContentUrl` | The image itself, as a `Uri`: either a reachable `https://` URL, or a `data:<mime>;base64,<encoded>` URI. |
+| `Name` | Optional display name for the attachment (e.g. `weekly.png`). |
+| `ThumbnailUrl` | Optional preview image. Rarely needed for an inline image, since the image is already its own preview. |
+| `Content` | Embedded payload, used by card attachments. Leave it unset for an image. |
+
+## Send several images
+
+Add more than one attachment to send a set of images in a single message, and set the attachment layout to control how the client arranges them:
+
+```csharp
+TeamsAttachment salesChart = TeamsAttachment.CreateBuilder()
+    .WithContentType(new AttachmentContentType("image/png"))
+    .WithContentUrl(new Uri("https://contoso.com/charts/sales.png"))
+    .WithName("sales.png")
+    .Build();
+
+TeamsAttachment trafficChart = TeamsAttachment.CreateBuilder()
+    .WithContentType(new AttachmentContentType("image/png"))
+    .WithContentUrl(new Uri("https://contoso.com/charts/traffic.png"))
+    .WithName("traffic.png")
+    .Build();
+
+await context.SendAsync(
+    new MessageActivityInput()
+        .WithText("This week at a glance:")
+        .WithAttachmentLayout(AttachmentLayoutType.Carousel)
+        .AddAttachment(salesChart, trafficChart),
+    cancellationToken);
+```
+
+`AddAttachment()` takes `params TeamsAttachment[]` and appends, so calling it more than once builds the list up rather than replacing it. `AttachmentLayoutType` offers `List` (the default), `Carousel`, and `Grid`.
+
+## Images in an Adaptive Card
+
+A message attachment is not the only way to put a picture in front of a user. An [Adaptive Card](#adaptive-cards) can contain an `Image` element, which is a different mechanism with a different trade-off:
+
+| | Message attachment | Adaptive Card image |
+|---|---|---|
+| Where it renders | Beside the message text, as a standalone picture | Inside the card's layout, alongside other card elements |
+| What you control | Little. The client decides presentation. | Size, alignment, alt text, expand behavior, and a select action |
+| Good for | A chart or screenshot that is the whole point of the message | An image that is one part of a richer, interactive message |
+
+```csharp
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Cards;
+
+AdaptiveCard card = new AdaptiveCard
+{
+    Body =
+    [
+        new Image("https://contoso.com/charts/weekly.png")
+        {
+            AltText = "Weekly sales chart",
+            Size = Size.Large,
+        }
+    ],
+};
+
+await context.SendAsync(
+    new MessageActivityInput().AddAdaptiveCardAttachment(card),
+    cancellationToken);
+```
+
+Card images accept the same two `url` forms, a hosted URL or a base64 data URI, and are subject to the same practical payload ceiling when embedded.
+
+## Streamed messages
+
+Attachments ride on the final message of a stream, not on the intermediate chunks: the chunks are typing activities, which carry no attachments. Build up the text with the usual streaming calls, then emit a message activity with the image attached as the last one, and the image arrives with the completed message.
+
+## Next steps
+
+- [Receiving Files](#receiving-files) covers the inbound direction: reading files a user attaches to a message.
+- [Sending Messages](#sending-messages) covers the rest of the outbound message surface, including streaming, mentions, and quoted replies.
+- [Adaptive Cards](#adaptive-cards) covers building richer card layouts.
+- [Send and receive messages](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/conversations/conversation-messages#use-picture-messages) documents the platform-side picture limits.
+- [Add media attachments to messages](https://learn.microsoft.com/en-us/azure/bot-service/rest-api/bot-framework-rest-connector-add-media-attachments?view=azure-bot-service-4.0) documents the underlying attachment wire format.
+
+---
+
+### PAGE: 🔗 Link unfurling
+
+# 🔗 Link unfurling
+
+Link unfurling lets your app respond when users paste URLs into Teams. When a URL from your registered domain is pasted, your app receives the URL and can return a card with additional information or actions. This works like a search command where the URL acts as the search term.
+
+:::note
+Users can use link unfurling even before they discover or install your app in Teams. This is called [Zero install link unfurling](https://learn.microsoft.com/en-us/microsoftteams/platform/messaging-extensions/how-to/link-unfurling?tabs=desktop%2Cjson%2Cadvantages#zero-install-for-link-unfurling). In this scenario, your app will receive a `message.ext.anon-query-link` activity instead of the usual `message.ext.query-link`.
+:::
+
+## Setting up your Teams app manifest
+
+### Configure message handlers
+
+```json
+"composeExtensions": [
+    {
+        "botId": "${{BOT_ID}}",
+        "messageHandlers": [
+            {
+                "type": "link",
+                "value": {
+                    "domains": [
+                        "www.example.com"
+                    ]
+                }
+            }
+        ]
+    }
+]
+```
+
+### How link unfurling works
+
+When a user pastes a URL from your registered domain (like `www.example.com`) into the Teams compose box, your app will receive a notification. Your app can then respond by returning an adaptive card that displays a preview of the linked content. This preview card appears before the user sends their message in the compose box, allowing them to see how the link will be displayed to others.
+
+```mermaid
+flowchart TD
+    A1["User pastes a URL (e.g., www\.example\.com) in Teams compose box"]
+    B1([Microsoft Teams])
+    C1["Your App"]
+    D1["Adaptive Card Preview"]
+
+    A1 --> B1
+    B1 -->|Sends URL paste notification| C1
+    C1 -->|Returns card and preview| B1
+    B1 --> D1
+
+    %% Styling for readability and compatibility
+    style B1 fill:#2E86AB,stroke:#1B4F72,stroke-width:2px,color:#ffffff
+    style C1 fill:#28B463,stroke:#1D8348,stroke-width:2px,color:#ffffff
+    style D1 fill:#F39C12,stroke:#D68910,stroke-width:2px,color:#ffffff
+```
+
+## Implementing link unfurling
+
+### Handle the query link event
+
+Handle link unfurling when a URL from your registered domain is submitted into the Teams compose box.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using Microsoft.Teams.Api.Activities.Invokes.MessageExtensions;
+using Microsoft.Teams.Api.MessageExtensions;
+using Microsoft.Teams.Apps.Annotations;
+
+//...
+
+[MessageExtension.QueryLink]
+public Response OnMessageExtensionQueryLink(
+    [Context] QueryLinkActivity activity,
+    [Context] IContext.Client client,
+    [Context] ILogger log)
+{
+    log.Info("[MESSAGE_EXT_QUERY_LINK] Link unfurling received");
+
+    var url = activity.Value?.Url;
+    log.Info($"[MESSAGE_EXT_QUERY_LINK] URL: {url}");
+
+    if (string.IsNullOrEmpty(url))
+    {
+        return CreateErrorResponse("No URL provided");
+    }
+
+    return CreateLinkUnfurlResponse(url, log);
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using Microsoft.Teams.Apps.MessageExtensions;
+
+//...
+
+bot.OnQueryLink(async (context, cancellationToken) =>
+{
+    MessageExtensionQueryLink? queryLink = context.Activity.Value;
+    string? url = queryLink?.Url?.ToString();
+
+    if (string.IsNullOrEmpty(url))
+    {
+        return MessageExtensionResponse.CreateBuilder()
+            .WithType(MessageExtensionResponseTypes.Message)
+            .WithText("No URL provided")
+            .Build();
+    }
+
+    return CreateLinkUnfurlResponse(url);
+});
+```
+
+### Create the unfurl card
+
+`CreateLinkUnfurlResponse()` method
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using Microsoft.Teams.Api;
+using Microsoft.Teams.Api.MessageExtensions;
+using Microsoft.Teams.Cards;
+
+//...
+
+private static Response CreateLinkUnfurlResponse(string url, ILogger log)
+{
+    var card = new AdaptiveCard
+    {
+        Schema = "http://adaptivecards.io/schemas/adaptive-card.json",
+        Body = new List
+        {
+            new TextBlock("Link Preview")
+            {
+                Weight = TextWeight.Bolder,
+                Size = TextSize.Medium
+            },
+            new TextBlock($"URL: {url}")
+            {
+                IsSubtle = true,
+                Wrap = true
+            },
+            new TextBlock("This is a preview of the linked content generated by the message extension.")
+            {
+                Wrap = true,
+                Size = TextSize.Small
+            }
+        }
+    };
+
+    var attachment = new Microsoft.Teams.Api.MessageExtensions.Attachment
+    {
+        ContentType = new ContentType("application/vnd.microsoft.card.adaptive"),
+        Content = card
+    };
+
+    return new Response
+    {
+        ComposeExtension = new Result
+        {
+            Type = ResultType.Result,
+            AttachmentLayout = Layout.List,
+            Attachments = new List { attachment }
+        }
+    };
+}
+
+// Helper method to create error responses
+private static Response CreateErrorResponse(string message)
+{
+    return new Response
+    {
+        ComposeExtension = new Result
+        {
+            Type = ResultType.Message,
+            Text = message
+        }
+    };
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Apps.MessageExtensions;
+using Microsoft.Teams.Apps.Schema;
+using Microsoft.Teams.Cards;
+
+//...
+
+private static InvokeResponse CreateLinkUnfurlResponse(string url)
+{
+    var card = new AdaptiveCard
+    {
+        Body = new List
+        {
+            new TextBlock("Link Preview") { Weight = TextWeight.Bolder, Size = TextSize.Medium },
+            new TextBlock($"URL: {url}") { IsSubtle = true, Wrap = true },
+            new TextBlock("This is a preview of the linked content generated by the message extension.")
+            {
+                Wrap = true,
+                Size = TextSize.Small
+            }
+        }
+    };
+
+    TeamsAttachment attachment = TeamsAttachment.CreateBuilder()
+        .WithAdaptiveCard(JsonSerializer.SerializeToElement(card))
+        .Build();
+
+    return MessageExtensionResponse.CreateBuilder()
+        .WithType(MessageExtensionResponseTypes.Result)
+        .WithAttachmentLayout(TeamsAttachmentLayouts.List)
+        .WithAttachments(attachment)
+        .Build();
+}
+```
+
+### User experience flow
+
+The link unfurling response includes both a full adaptive card and a preview card. The preview card appears in the compose box when a user pastes a URL:
+
+![Screenshot showing a preview card for an unfurled URL in the Teams compose box.](/screenshots/link-unfurl-preview.png)
+
+The user can expand the preview card by clicking on the _expand_ button on the top right.
+
+![Screenshot of Teams compose box with an outline around the unfurled link card labeled 'Adaptive Card'.](/screenshots/link-unfurl-card.png)
+
+The user can then choose to send either the preview or the full adaptive card as a message.
+
+## Resources
+
+- [Link unfurling](https://learn.microsoft.com/en-us/microsoftteams/platform/messaging-extensions/how-to/link-unfurling?tabs=desktop%2Cjson%2Cadvantages)
+- [Zero install link unfurling](https://learn.microsoft.com/en-us/microsoftteams/platform/messaging-extensions/how-to/link-unfurling?tabs=desktop%2Cjson%2Cadvantages#zero-install-for-link-unfurling)
+
+---
+
+### PAGE: Functions
+
+# Functions
+
+**SDK 2.0 (Legacy):**
+
+Agents may want to expose REST APIs that client applications can call. SDK 2.0 provides the `app.AddFunction()` helper for this.
+
+**SDK 2.1 (current):**
+
+Agents may want to expose REST APIs that client applications can call. In SDK 2.1, implement these with standard ASP.NET endpoints (for example `app.MapPost(...)`) and protect them with authorization.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+app.AddFunction("do-something", context =>
+{
+    // do something useful
+});
+```
+
+This registers `http://localhost:PORT/api/functions/do-something` or `https://BOT_DOMAIN/api/functions/do-something`.
+
+When called, SDK 2.0 validates the bearer token before invoking your callback. Missing or invalid tokens are rejected with HTTP 401.
+
+Typed payload example:
+
+```csharp
+public class ProcessMessageData
+{
+    [JsonPropertyName("message")]
+    public required string Message { get; set; }
+}
+
+app.AddFunction("process-message", context =>
+{
+    context.Log.Debug($"process-message with: {context.Data.Message}");
+});
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using Microsoft.Teams.Core.Hosting;
+
+public class ProcessMessageData
+{
+    public required string Message { get; set; }
+}
+
+var builder = WebApplication.CreateSlimBuilder(args);
+builder.Services.AddBotAuthorization();
+
+var app = builder.Build();
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapPost("/api/functions/process-message", (ProcessMessageData data, ILogger logger) =>
+{
+    logger.LogInformation("process-message with: {Message}", data.Message);
+    return Results.Ok(new { success = true });
+})
+.RequireAuthorization();
+```
+
+In SDK 2.1, token validation is handled by ASP.NET auth middleware plus `.RequireAuthorization()`.
+
+:::warning
+This SDK does not validate that function arguments are of the expected types or otherwise trustworthy. Always validate request payloads before using them.
+:::
+
+**SDK 2.0 (Legacy):**
+
+If desired, the function can return data to the caller.
+
+```csharp
+app.AddFunction("get-random-number", () =>
+{
+    return 4; // chosen by fair dice roll;
+              // guaranteed to be random
+});
+```
+
+**SDK 2.1 (current):**
+
+In SDK 2.1, return standard ASP.NET minimal API results:
+
+```csharp
+app.MapPost("/api/functions/get-random-number", () =>
+{
+    return Results.Ok(new { value = 4 });
+})
+.RequireAuthorization();
+```
+
+## Function context
+
+**SDK 2.0 (Legacy):**
+
+The function callback receives a `FunctionContext` object with useful values from the app and caller.
+
+**SDK 2.1 (current):**
+
+SDK 2.1 function endpoints use standard ASP.NET handler parameters instead of a Teams `FunctionContext`.
+
+**SDK 2.0 (Legacy):**
+
+| Property       | Source | Description                                                                                                         |
+| -------------- | ------ | ------------------------------------------------------------------------------------------------------------------- |
+| `Api`          | Agent  | The API client.                                                                                                     |
+| `AppId`        | Agent  | Unique identifier assigned to the app after deployment, ensuring correct app instance recognition across hosts.     |
+| `AppSessionId` | Caller | Unique ID for the calling app's session, used to correlate telemetry data.                                          |
+| `AuthToken`    | Caller | The validated MSAL Entra token.                                                                                     |
+| `ChannelId`    | Caller | Microsoft Teams ID for the channel associated with the content.                                                     |
+| `ChatId`       | Caller | Microsoft Teams ID for the chat associated with the content.                                                        |
+| `Data`         | Caller | The function payload.                                                                                                |
+| `Log`          | Agent  | The app logger instance.                                                                                             |
+| `MeetingId`    | Caller | Meeting ID used by tab when running in meeting context.                                                             |
+| `MessageId`    | Caller | ID of the parent message from which the task module was launched (only available in bot card-launched modules).     |
+| `PageId`       | Caller | Developer-defined unique ID for the page this content points to.                                                    |
+| `Send`         | Agent  | Sends an activity to the current conversation.                                                                      |
+| `SubPageId`    | Caller | Developer-defined unique ID for the sub-page this content points to. Used to restore specific state within a page. |
+| `TeamId`       | Caller | Microsoft Teams ID for the team associated with the content.                                                        |
+| `TenantId`     | Caller | Microsoft Entra tenant ID of the current user, extracted from the validated auth token.                             |
+| `UserId`       | Caller | Microsoft Entra object ID of the current user, extracted from the validated auth token.                             |
+| `UserName`     | Caller | Microsoft Entra name of the current user, extracted from the validated auth token.                                  |
+
+**SDK 2.1 (current):**
+
+| Parameter / Source         | Description |
+| -------------------------- | ----------- |
+| `ProcessMessageData data`  | Request body payload from caller |
+| `ClaimsPrincipal user`     | Authenticated user claims |
+| `HttpContext`              | Request context (headers, route data, services) |
+| `ILogger`               | Logging from DI |
+| Other DI services          | Any registered service needed by your endpoint |
+
+**SDK 2.0 (Legacy):**
+
+`AuthToken` is validated before the callback runs, and `TenantId`, `UserId`, and `UserName` are extracted from the validated token. Remaining caller values are not validated by the SDK.
+
+:::warning
+Take care to validate caller-supplied values before using them. Don't assume the user has access to IDs passed in context.
+:::
+
+**SDK 2.1 (current):**
+
+In SDK 2.1, use `.RequireAuthorization()` so only authenticated callers reach the endpoint. You should still validate caller payload, route values, and business-level authorization.
+
+:::warning
+Authentication is not authorization for specific business resources. Always enforce resource-level checks in your handler.
+:::
+
+**SDK 2.0 (Legacy):**
+
+To simplify common scenarios, SDK 2.0 `FunctionContext` provides `Send`.
+
+`Send` posts to the current conversation ID determined from caller context (`chatId`/`channelId`). If neither is provided, it assumes the 1:1 chat between the bot and user.
+
+:::warning
+`Send` does not validate that caller-provided chat or channel IDs are correct. Validate caller-provided conversation identifiers before use.
+:::
+
+**SDK 2.1 (current):**
+
+In SDK 2.1, implement helper behavior explicitly in your endpoint (for example, resolve target conversation, verify access, then send via `ConversationClient`).
+
+## Additional resources
+
+- For the SDK 2.1 route-based example, see `core/samples/TabApp/Program.cs` in the Teams .NET repository.
+- For details on how tab apps invoke these functions, see the TypeScript [Executing Functions](../../../../typescript/in-depth-guides/tabs/functions/function-calling) in-depth guide.
+
+---
+
+### PAGE: Meeting Events
+
+# Meeting Events
+
+Microsoft Teams provides meeting events that allow your application to respond to various meeting lifecycle changes. Your app can listen to events like when a meeting starts, meeting ends, and participant activities to create rich, interactive experiences.
+
+## Overview
+
+Meeting events enable your application to:
+- Send notifications when meetings start or end
+- Track participant activity (join/leave events)
+- Display relevant information or cards based on meeting context
+- Integrate with meeting workflows
+
+## Configuring Your Bot
+
+There are a few requirements in the Teams app manifest (`manifest.json`) to support these events.
+
+1. The scopes section must include `team`, and `groupChat`
+
+```json
+bots": [
+        {
+            "botId": "",
+            "scopes": [
+                "team",
+                "personal",
+                "groupChat"
+            ],
+            "isNotificationOnly": false
+        }
+    ]
+```
+
+2. In the authorization section, make sure to specify the following resource-specific permissions:
+
+```json
+ "authorization":{
+        "permissions":{
+            "resourceSpecific":[
+                {
+                    "name":"OnlineMeetingParticipant.Read.Chat",
+                    "type":"Application"
+                },
+                {
+                    "name":"ChannelMeeting.ReadBasic.Group",
+                    "type":"Application"
+                },
+                {
+                    "name":"OnlineMeeting.ReadBasic.Chat",
+                    "type":"Application"
+                }
+                ]
+            }
+        }
+```
+
+3. In the Teams Developer Portal, for your `Bot`, make sure the `Meeting Event Subscriptions` are checked off. This enables you to receive the Meeting Participant events. For these events, you must create your Bot via TDP.
+
+## Meeting Start Event
+
+When a meeting starts, your app can handle the `meetingStart` event to send a notification or card to the meeting chat.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Activities;
+using Microsoft.Teams.Apps.Activities.Events;
+using Microsoft.Teams.Cards;
+
+// Register meeting start handler
+app.OnMeetingStart(async (context, cancellationToken) =>
+{
+    var activity = context.Activity.Value;
+    var startTime = activity.StartTime.ToLocalTime();
+
+    var card = new AdaptiveCard
+    {
+        Schema = "http://adaptivecards.io/schemas/adaptive-card.json",
+        Body = new List
+        {
+            new TextBlock($"'{activity.Title}' has started at {startTime}.")
+            {
+                Wrap = true,
+                Weight = TextWeight.Bolder
+            }
+        },
+        // Meetings held inside a channel have no join URL, so there is no action to offer.
+        Actions = activity.JoinUrl is null
+            ? new List()
+            : new List
+            {
+                new OpenUrlAction(activity.JoinUrl)
+                {
+                    Title = "Join the meeting",
+                }
+            }
+    };
+
+    await context.Send(card, cancellationToken);
+});
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Activities;
+using Microsoft.Teams.Apps.Activities.Events;
+using Microsoft.Teams.Cards;
+
+// Register meeting start handler
+teams.OnMeetingStart(async (context, cancellationToken) =>
+{
+    var activity = context.Activity.Value;
+    var startTime = DateTimeOffset.Parse(activity.StartTime).ToLocalTime();
+
+    var card = new AdaptiveCard
+    {
+        Schema = "http://adaptivecards.io/schemas/adaptive-card.json",
+        Body = new List
+        {
+            new TextBlock($"'{activity.Title}' has started at {startTime}.")
+            {
+                Wrap = true,
+                Weight = TextWeight.Bolder
+            }
+        },
+        // Meetings held inside a channel have no join URL, so there is no action to offer.
+        Actions = activity.JoinUrl is null
+            ? new List()
+            : new List
+            {
+                new OpenUrlAction(activity.JoinUrl)
+                {
+                    Title = "Join the meeting",
+                }
+            }
+    };
+
+    TeamsAttachment attachment = TeamsAttachment.CreateBuilder()
+        .WithAdaptiveCard(JsonSerializer.SerializeToElement(card))
+        .Build();
+    await context.SendAsync(new MessageActivityInput().AddAttachment(attachment), cancellationToken);
+});
+```
+
+## Meeting End Event
+
+When a meeting ends, your app can handle the `meetingEnd` event to send a summary or follow-up information.
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Activities;
+using Microsoft.Teams.Apps.Activities.Events;
+using Microsoft.Teams.Cards;
+
+// Register meeting end handler
+app.OnMeetingEnd(async (context, cancellationToken) =>
+{
+    var activity = context.Activity.Value;
+    var endTime = activity.EndTime.ToLocalTime();
+
+    var card = new AdaptiveCard
+    {
+        Schema = "http://adaptivecards.io/schemas/adaptive-card.json",
+        Body = new List
+        {
+            new TextBlock($"'{activity.Title}' has ended at {endTime}.")
+            {
+                Wrap = true,
+                Weight = TextWeight.Bolder
+            }
+        }
+    };
+
+    await context.Send(card, cancellationToken);
+});
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Activities;
+using Microsoft.Teams.Apps.Activities.Events;
+using Microsoft.Teams.Cards;
+
+// Register meeting end handler
+teams.OnMeetingEnd(async (context, cancellationToken) =>
+{
+    var activity = context.Activity.Value;
+    var endTime = DateTimeOffset.Parse(activity.EndTime).ToLocalTime();
+
+    var card = new AdaptiveCard
+    {
+        Schema = "http://adaptivecards.io/schemas/adaptive-card.json",
+        Body = new List
+        {
+            new TextBlock($"'{activity.Title}' has ended at {endTime}.")
+            {
+                Wrap = true,
+                Weight = TextWeight.Bolder
+            }
+        }
+    };
+
+    TeamsAttachment attachment = TeamsAttachment.CreateBuilder()
+        .WithAdaptiveCard(JsonSerializer.SerializeToElement(card))
+    

@@ -1,0 +1,842 @@
+          "type": "Input.Text",
+                "id": "email",
+                "label": "Email",
+                "placeholder": "Enter your email",
+                "isRequired": true
+            }
+        ],
+        "actions": [
+            {
+                "type": "Action.Submit",
+                "title": "Submit",
+                "data": {"submissiondialogtype": "webpage_dialog_step_2", "name": "{{nameStep1}}"}
+            }
+        ]
+    }
+    """;
+
+    var nextStepCard = JsonSerializer.Deserialize(nextStepCardJson)
+        ?? throw new InvalidOperationException("Failed to deserialize next step card");
+
+    var nextStepTaskInfo = new TaskInfo
+    {
+        Title = $"Thanks {nameStep1} - Get Email",
+        Card = new Attachment
+        {
+            ContentType = new ContentType("application/vnd.microsoft.card.adaptive"),
+            Content = nextStepCard
+        }
+    };
+
+    return new Response(new ContinueTask(nextStepTaskInfo));
+
+case "webpage_dialog_step_2":
+    var nameStep2 = GetFormValue("name") ?? "Unknown";
+    var emailStep2 = GetFormValue("email") ?? "No email";
+    await client.Send($"Hi {nameStep2}, thanks for submitting the form! We got that your email is {emailStep2}");
+    return new Response(new MessageTask("Multi-step form completed successfully"));
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Apps.Schema;
+using Microsoft.Teams.Apps.TaskModules;
+using Microsoft.Teams.Cards;
+
+//...
+
+// Add these cases to the OnTaskSubmit handler switch statement
+case "webpage_dialog_step_1":
+    var nameStep1 = GetFormValue("name") ?? "Unknown";
+    var nextStepCard = new AdaptiveCard
+    {
+        Body = new List
+        {
+            new TextBlock("Email")
+            {
+                Size = TextSize.Large,
+                Weight = TextWeight.Bolder
+            },
+            new TextInput
+            {
+                Id = "email",
+                Label = "Email",
+                Placeholder = "Enter your email",
+                IsRequired = true
+            }
+        },
+        Actions = new List
+        {
+            new SubmitAction
+            {
+                Title = "Submit",
+                Data = new { submissiondialogtype = "webpage_dialog_step_2", name = nameStep1 }
+            }
+        }
+    };
+
+    TeamsAttachment nextStepAttachment = TeamsAttachment.CreateBuilder()
+        .WithAdaptiveCard(JsonSerializer.SerializeToElement(nextStepCard))
+        .Build();
+
+    return TaskModuleResponse.CreateBuilder()
+        .WithType(TaskModuleResponseTypes.Continue)
+        .WithTitle($"Thanks {nameStep1} - Get Email")
+        .WithHeight("medium")
+        .WithWidth("medium")
+        .WithCard(nextStepAttachment)
+        .Build();
+
+case "webpage_dialog_step_2":
+    var nameStep2 = GetFormValue("name") ?? "Unknown";
+    var emailStep2 = GetFormValue("email") ?? "No email";
+    await context.SendAsync($"Hi {nameStep2}, thanks for submitting the form! We got that your email is {emailStep2}", cancellationToken);
+    return TaskModuleResponse.CreateBuilder()
+        .WithType(TaskModuleResponseTypes.Message)
+        .WithMessage("Multi-step form completed successfully")
+        .Build();
+```
+
+### Complete Multi-Step Form Handler
+
+Here's the complete example showing how to handle a multi-step form:
+
+**SDK 2.0 (Legacy):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Api;
+using Microsoft.Teams.Api.TaskModules;
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Activities.Invokes;
+using Microsoft.Teams.Apps.Annotations;
+using Microsoft.Teams.Cards;
+using Microsoft.Teams.Common.Logging;
+
+//...
+
+[TaskSubmit]
+public async Task OnTaskSubmit([Context] Tasks.SubmitActivity activity, [Context] IContext.Client client, [Context] ILogger log)
+{
+    log.Info("[TASK_SUBMIT] Task submit request received");
+
+    var data = activity.Value?.Data as JsonElement?;
+    if (data == null)
+    {
+        log.Info("[TASK_SUBMIT] No data found in the activity value");
+        return new Response(new MessageTask("No data found in the activity value"));
+    }
+
+    var submissionType = data.Value.TryGetProperty("submissiondialogtype", out var submissionTypeObj) && submissionTypeObj.ValueKind == JsonValueKind.String
+        ? submissionTypeObj.ToString()
+        : null;
+
+    log.Info($"[TASK_SUBMIT] Submission type: {submissionType}");
+
+    string? GetFormValue(string key)
+    {
+        if (data.Value.TryGetProperty(key, out var val))
+        {
+            if (val is JsonElement element)
+                return element.GetString();
+            return val.ToString();
+        }
+        return null;
+    }
+
+    switch (submissionType)
+    {
+        case "webpage_dialog_step_1":
+            var nameStep1 = GetFormValue("name") ?? "Unknown";
+            var nextStepCardJson = $$"""
+            {
+                "type": "AdaptiveCard",
+                "version": "1.4",
+                "body": [
+                    {
+                        "type": "TextBlock",
+                        "text": "Email",
+                        "size": "Large",
+                        "weight": "Bolder"
+                    },
+                    {
+                        "type": "Input.Text",
+                        "id": "email",
+                        "label": "Email",
+                        "placeholder": "Enter your email",
+                        "isRequired": true
+                    }
+                ],
+                "actions": [
+                    {
+                        "type": "Action.Submit",
+                        "title": "Submit",
+                        "data": {"submissiondialogtype": "webpage_dialog_step_2", "name": "{{nameStep1}}"}
+                    }
+                ]
+            }
+            """;
+
+            var nextStepCard = JsonSerializer.Deserialize(nextStepCardJson)
+                ?? throw new InvalidOperationException("Failed to deserialize next step card");
+
+            var nextStepTaskInfo = new TaskInfo
+            {
+                Title = $"Thanks {nameStep1} - Get Email",
+                Card = new Attachment
+                {
+                    ContentType = new ContentType("application/vnd.microsoft.card.adaptive"),
+                    Content = nextStepCard
+                }
+            };
+
+            return new Response(new ContinueTask(nextStepTaskInfo));
+
+        case "webpage_dialog_step_2":
+            var nameStep2 = GetFormValue("name") ?? "Unknown";
+            var emailStep2 = GetFormValue("email") ?? "No email";
+            await client.Send($"Hi {nameStep2}, thanks for submitting the form! We got that your email is {emailStep2}");
+            return new Response(new MessageTask("Multi-step form completed successfully"));
+
+        default:
+            return new Response(new MessageTask("Unknown submission type"));
+    }
+}
+```
+
+**SDK 2.1 (current):**
+
+```csharp
+using System.Text.Json;
+using Microsoft.Teams.Apps.Schema;
+using Microsoft.Teams.Apps.TaskModules;
+using Microsoft.Teams.Cards;
+
+//...
+
+teams.OnTaskSubmit(async (context, cancellationToken) =>
+{
+    var data = context.Activity.Value?.Data as JsonElement?;
+    if (data == null)
+    {
+        return TaskModuleResponse.CreateBuilder()
+            .WithType(TaskModuleResponseTypes.Message)
+            .WithMessage("No data found in the activity value")
+            .Build();
+    }
+
+    var submissionType = data.Value.TryGetProperty("submissiondialogtype", out var submissionTypeObj) && submissionTypeObj.ValueKind == JsonValueKind.String
+        ? submissionTypeObj.ToString()
+        : null;
+
+    string? GetFormValue(string key)
+    {
+        if (data.Value.TryGetProperty(key, out var val))
+        {
+            if (val is JsonElement element)
+                return element.GetString();
+            return val.ToString();
+        }
+        return null;
+    }
+
+    switch (submissionType)
+    {
+        case "webpage_dialog_step_1":
+            var nameStep1 = GetFormValue("name") ?? "Unknown";
+            var nextStepCard = new AdaptiveCard
+            {
+                Body = new List
+                {
+                    new TextBlock("Email")
+                    {
+                        Size = TextSize.Large,
+                        Weight = TextWeight.Bolder
+                    },
+                    new TextInput
+                    {
+                        Id = "email",
+                        Label = "Email",
+                        Placeholder = "Enter your email",
+                        IsRequired = true
+                    }
+                },
+                Actions = new List
+                {
+                    new SubmitAction
+                    {
+                        Title = "Submit",
+                        Data = new { submissiondialogtype = "webpage_dialog_step_2", name = nameStep1 }
+                    }
+                }
+            };
+
+            TeamsAttachment nextStepAttachment = TeamsAttachment.CreateBuilder()
+                .WithAdaptiveCard(JsonSerializer.SerializeToElement(nextStepCard))
+                .Build();
+
+            return TaskModuleResponse.CreateBuilder()
+                .WithType(TaskModuleResponseTypes.Continue)
+                .WithTitle($"Thanks {nameStep1} - Get Email")
+                .WithHeight("medium")
+                .WithWidth("medium")
+                .WithCard(nextStepAttachment)
+                .Build();
+
+        case "webpage_dialog_step_2":
+            var nameStep2 = GetFormValue("name") ?? "Unknown";
+            var emailStep2 = GetFormValue("email") ?? "No email";
+            await context.SendAsync($"Hi {nameStep2}, thanks for submitting the form! We got that your email is {emailStep2}", cancellationToken);
+            return TaskModuleResponse.CreateBuilder()
+                .WithType(TaskModuleResponseTypes.Message)
+                .WithMessage("Multi-step form completed successfully")
+                .Build();
+
+        default:
+            return TaskModuleResponse.CreateBuilder()
+                .WithType(TaskModuleResponseTypes.Message)
+                .WithMessage("Unknown submission type")
+                .Build();
+    }
+});
+```
+
+---
+
+### PAGE: Handling Tool Calls
+
+# Handling Tool Calls
+
+An interactive widget can call tools on your app.
+When it does, the Teams client sends your app an `htmlwidget/calltool` invoke activity.
+The SDK gives you a typed handler for these invokes and a typed response shape, so you never parse the raw invoke body.
+
+:::warning Preview
+HTML Widgets are in preview and the API surface may change. HTML Widgets are planned for public preview on 11/16.
+:::
+
+## The flow
+
+1. Your app sends a widget whose HTML calls `tools/call` over the MCP Apps protocol.
+2. The Teams client forwards that call to your app as an `htmlwidget/calltool` invoke.
+3. Your handler inspects the tool name and arguments, does its work, and returns a result.
+4. The Teams client delivers the result back to the widget, which re-renders.
+
+## Registering a handler
+
+Register a handler with `teams.OnWidgetCallTool`. The activity value is typed, so you get the tool `Name` and `Arguments` directly.
+
+```csharp
+using Microsoft.Teams.Apps.HtmlWidget;
+
+teams.OnWidgetCallTool(async (context, cancellationToken) =>
+{
+    var request = context.Activity.Value;
+    var toolName = request?.Name ?? "unknown";
+
+    var response = toolName switch
+    {
+        "getTime" => new HtmlWidgetCallToolResponse
+        {
+            CallToolResult = new McpUiCallToolResult
+            {
+                Content = [new McpUiCallToolResultContent { Text = DateTime.UtcNow.ToString("HH:mm:ss") }],
+                StructuredContent = new { time = DateTime.UtcNow.ToString("o") },
+            }
+        },
+        _ => HtmlWidgetCallToolResponse.FromError($"Unknown tool: {toolName}"),
+    };
+
+    await Task.CompletedTask;
+    return InvokeResponse.Ok(response);
+});
+```
+
+## Returning a result
+
+A tool call result carries a list of content blocks, optional structured content the widget can render from, and an `isError` flag.
+Teams currently renders `text` content; the other MCP content types (`image`, `audio`, `resource`) are defined for forward compatibility.
+
+Return `InvokeResponse.Ok(...)` wrapping an `HtmlWidgetCallToolResponse` whose `ResponseType` is `htmlwidget/calltoolresult` and whose `CallToolResult` holds the payload.
+The result's `Content` is a list of content blocks; `StructuredContent` holds data the widget can render from; `IsError` signals a failure.
+`Content`, `StructuredContent` and `IsError` are always serialized, defaulting to an empty array, an empty object and `false`, because an omitted field can reach the widget as `null`.
+For the common text-only case, use the `FromText` and `FromError` factory methods.
+.NET has no `buildCallToolResult` equivalent, because `McpUiCallToolResult` applies those defaults itself: `Content` and `StructuredContent` fall back to an empty array and object when you assign `null`, and `IsError` is a `bool` that defaults to `false`.
+
+```csharp
+var response = new HtmlWidgetCallToolResponse
+{
+    CallToolResult = new McpUiCallToolResult
+    {
+        Content = [new McpUiCallToolResultContent { Text = "Refreshed!" }],
+        StructuredContent = new { counter = 1, lastAction = "refresh" },
+    }
+};
+
+// Or, for a simple text result:
+var quick = HtmlWidgetCallToolResponse.FromText("Refreshed!");
+```
+
+## Client-supplied call context
+
+The Teams client adds an `__msteams__` entry to the `arguments` of every call, carrying the `mcpUrl` and `correlationId` from the widget payload when they were set. The client overwrites any value the widget supplied, and the SDK passes `arguments` to your handler untouched. Ignore `__msteams__` when you read your tool's arguments, validate the other arguments as untrusted input, never throw from the handler, and do not authorize from `activity.from`.
+
+There is no separate .NET type for the entry. `Arguments` is typed `object?`, and it is a `JsonElement` when the widget sent an object.
+Read the entry from `context.Activity.Value.Arguments` if you need `mcpUrl` or `correlationId`, and ignore it when you treat the remaining arguments as your tool's input:
+
+```csharp
+if (context.Activity.Value?.Arguments is JsonElement { ValueKind: JsonValueKind.Object } args
+    && args.TryGetProperty("__msteams__", out var msteams)
+    && msteams.TryGetProperty("correlationId", out var correlationId))
+{
+    // correlationId.GetString()
+}
+```
+
+## Throttling in large contexts
+
+In large or busy contexts the Teams platform may throttle widget tool calls, so your app can receive fewer `htmlwidget/calltool` invokes than the widget issued. This throttling happens on the platform before the invoke reaches your app, so there is no error or `429` status for your handler to catch and nothing for the SDK to retry. Design your tool handlers so that a dropped call is not fatal: keep them idempotent, and let the widget reflect its own state rather than assuming every call reaches your app.
+
+---
+
+### PAGE: OpenTelemetry
+
+# OpenTelemetry
+
+:::info[SDK 2.1]
+OpenTelemetry instrumentation is available in **Teams SDK 2.1**.
+:::
+
+The Teams SDK instruments its pipeline through standard .NET primitives — `ActivitySource`, `Meter`, and `ILogger`. Your host application opts in by registering the SDK's source and meter names, then choosing where to export — [Azure Monitor / Application Insights](https://learn.microsoft.com/azure/azure-monitor/app/opentelemetry-enable), an OTLP collector, or both.
+
+The SDK follows the .NET [library instrumentation model](https://learn.microsoft.com/dotnet/core/diagnostics/distributed-tracing-instrumentation-walkthroughs): **libraries produce telemetry; applications choose collection and export.** The SDK does not automatically send telemetry anywhere — your app controls what is collected and where it goes.
+
+![End-to-end observability architecture: the Teams SDK emits telemetry via .NET primitives (ActivitySource, Meter, ILogger), the ASP.NET Core host opts into collection and export, and exporters route data to Azure Monitor, OTLP local tooling, or governed backends](/screenshots/otel-architecture.png)
+
+## Prerequisites
+
+Install the Teams SDK and OpenTelemetry packages:
+
+```bash
+dotnet add package Microsoft.Teams.Apps --prerelease
+dotnet add package OpenTelemetry.Extensions.Hosting
+dotnet add package OpenTelemetry.Instrumentation.Http
+dotnet add package OpenTelemetry.Instrumentation.AspNetCore
+```
+
+For Azure Monitor / Application Insights export, also add:
+
+```bash
+dotnet add package Azure.Monitor.OpenTelemetry.AspNetCore
+```
+
+Or start from the [OTelBotWithAspire sample](https://github.com/microsoft/teams-agent-accelerator-templates/tree/main/dotnet/OTelBotWithAspire), which includes all dependencies pre-configured through [.NET Aspire service defaults](https://learn.microsoft.com/dotnet/aspire/fundamentals/service-defaults).
+
+## Setup
+
+Register the Teams SDK's telemetry sources when configuring OpenTelemetry. The key lines are `AddSource` and `AddMeter` — everything else is standard OpenTelemetry .NET setup:
+
+```csharp
+using Microsoft.Teams.Apps.Diagnostics;
+using Microsoft.Teams.Core.Diagnostics;
+
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing =>
+    {
+        tracing.AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation();
+        tracing.AddSource(new[] { CoreTelemetryNames.ActivitySourceName,   // "Microsoft.Teams.Core"
+                                   TeamsBotApplicationTelemetry.ActivitySourceName }); // "Microsoft.Teams.Apps"
+    })
+    .WithMetrics(metrics =>
+    {
+        metrics.AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation()
+            .AddRuntimeInstrumentation();
+        metrics.AddMeter(new[] { CoreTelemetryNames.MeterName,
+                                 TeamsBotApplicationTelemetry.MeterName });
+    });
+```
+
+## What the SDK Instruments
+
+The Teams SDK emits spans and metrics from two sources. Auto-instrumented libraries (ASP.NET Core, `HttpClient`, Azure SDKs) add their own spans as children automatically.
+
+### Traces
+
+Every incoming activity flows through a structured span hierarchy:
+
+```
+HTTP server span                       (auto — ASP.NET Core)
+└─ turn                                (Microsoft.Teams.Core)
+   ├─ middleware [n times]             (Microsoft.Teams.Core)
+   ├─ handler                          (Microsoft.Teams.Apps)
+   └─ conversation_client              (Microsoft.Teams.Core)
+      ├─ auth.outbound                 (Microsoft.Teams.Core)
+      │  └─ HTTP client span           (auto — token endpoint)
+      └─ HTTP client span              (auto — Bot Service API)
+```
+
+The `turn` span is enriched with activity type, activity ID, conversation ID, and channel ID.
+
+### Metrics
+
+The SDK exposes counters and histograms through two meters:
+
+| Metric | Type | Description |
+| --- | --- | --- |
+| `teams.activities.received` | Counter | Activities received by the bot |
+| `teams.turn.duration` | Histogram (ms) | End-to-end turn processing time |
+| `teams.handler.errors` | Counter | Unhandled exceptions in handlers |
+| `teams.middleware.duration` | Histogram (ms) | Per-middleware execution time |
+| `teams.outbound.calls` | Counter | Outbound Bot Service API calls |
+| `teams.outbound.errors` | Counter | Failed outbound calls |
+
+### Correlated Logs
+
+Every `ILogger` record produced inside a turn automatically carries the active `TraceId` and `SpanId`. This means you can pivot from a slow trace directly to its log lines — no manual correlation needed.
+
+Enable OpenTelemetry log export so that `ILogger` output flows to the same backend as your traces and metrics:
+
+```csharp
+builder.Logging.AddOpenTelemetry(logging =>
+{
+    logging.IncludeFormattedMessage = true;
+    logging.IncludeScopes = true;
+});
+```
+
+Setting `IncludeScopes = true` preserves log scopes as custom properties in your backend — useful for filtering by conversation ID, tenant ID, or other contextual values.
+
+## Exporting to Azure Monitor
+
+To export to [Azure Monitor / Application Insights](https://learn.microsoft.com/azure/azure-monitor/app/opentelemetry-enable), set the `APPLICATIONINSIGHTS_CONNECTION_STRING` environment variable and call `UseAzureMonitor()`:
+
+```csharp
+using Azure.Monitor.OpenTelemetry.AspNetCore;
+
+if (!string.IsNullOrEmpty(builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"]))
+{
+    builder.Services.AddOpenTelemetry().UseAzureMonitor();
+}
+```
+
+`UseAzureMonitor()` bundles instrumentation and exporters for traces, metrics, logs, and Live Metrics. In the Application Insights portal, you can inspect each turn end-to-end — from the inbound HTTP request through middleware, handler dispatch, and outbound Bot Service calls — all in a single correlated trace view.
+
+> **Note:** Azure Monitor enables [trace-based log sampling](https://learn.microsoft.com/azure/azure-monitor/app/opentelemetry-configuration#logs) by default, keeping logs aligned with trace sampling decisions. Review the sampling configuration for production workloads.
+
+Here is a turn in Application Insights — the span hierarchy from the inbound HTTP request through turn processing, handler dispatch, and outbound Bot Service calls:
+
+![Application Insights end-to-end transaction view showing the span hierarchy for a bot turn — turn, handler, conversation_client, auth.outbound, and the outbound Bot Service call](/screenshots/appinsights-otel-trace.png)
+
+## Exporting to a Local OTLP Collector
+
+For local development, you can send telemetry to any OTLP-compatible backend without changing your application code — just configure the exporter endpoint.
+
+### Aspire Dashboard
+
+The [.NET Aspire Dashboard](https://learn.microsoft.com/dotnet/aspire/fundamentals/dashboard/standalone) shows traces, metrics, and structured logs in a single standalone UI:
+
+The [OTelBotWithAspire sample](https://github.com/microsoft/teams-agent-accelerator-templates/tree/main/dotnet/OTelBotWithAspire) includes an Aspire AppHost that orchestrates the bot and automatically provides the dashboard. Run the AppHost project and the dashboard opens at `http://localhost:18888`:
+
+```csharp
+// OTelBotWithAspire.AppHost/AppHost.cs
+IDistributedApplicationBuilder builder = DistributedApplication.CreateBuilder(args);
+builder.AddProject("otelbot");
+builder.Build().Run();
+```
+
+Alternatively, run the [standalone Aspire Dashboard](https://learn.microsoft.com/dotnet/aspire/fundamentals/dashboard/standalone) as a Docker container:
+
+```bash
+docker run --rm -d --name aspire-dashboard \
+  -p 18888:18888 -p 4317:18889 \
+  mcr.microsoft.com/dotnet/aspire-dashboard:latest
+
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_SERVICE_NAME=my-teams-bot
+
+dotnet run
+```
+
+![Aspire Dashboard trace view showing the bot turn span hierarchy — POST api/messages, turn, handler, conversation_client, auth.outbound, and the outbound Bot Service POST](/screenshots/aspire-otel-trace.png)
+
+### Grafana LGTM
+
+[Grafana LGTM](https://github.com/grafana/docker-otel-lgtm) bundles Tempo (traces), Mimir (metrics), Loki (logs), and Grafana in a single container:
+
+```bash
+docker run --rm -d --name lgtm \
+  -p 3000:3000 -p 4317:4317 -p 4318:4318 \
+  grafana/otel-lgtm
+
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_SERVICE_NAME=my-teams-bot
+
+dotnet run
+```
+
+Open `http://localhost:3000` (default credentials: `admin` / `admin`) to explore Tempo for traces, Mimir for metrics, and Loki for logs.
+
+Here is the same turn in Grafana Tempo — the span waterfall with span attributes showing `activity.type`, `activity.id`, `conversation.id`, `channel.id`, and the `Microsoft.Teams.Core` library name:
+
+![Grafana Tempo trace view showing 6 spans for a bot turn with expanded span attributes — activity.id, activity.type, bot.id, channel.id, conversation.id, and service.url](/screenshots/grafana-otel-trace.png)
+
+## AI and LLM Instrumentation
+
+If your bot calls AI models through [`Microsoft.Extensions.AI`](https://learn.microsoft.com/dotnet/ai/ai-extensions), you can add OpenTelemetry instrumentation to capture LLM spans (chat completions, token usage) and tool-call spans (MCP or function invocation) as part of the same trace. These spans appear as children of the bot's `handler` span, giving you end-to-end visibility from the inbound Teams message through AI model calls and back.
+
+### Step 1: Add the OpenTelemetry middleware to the chat client
+
+When building the `IChatClient` pipeline, call `.UseOpenTelemetry()` to emit spans for each chat completion and tool invocation:
+
+```csharp
+using Azure.AI.OpenAI;
+using Microsoft.Extensions.AI;
+
+IChatClient innerClient = new AzureOpenAIClient(new Uri(endpoint), new Azure.AzureKeyCredential(key))
+    .GetChatClient(deployment)
+    .AsIChatClient();
+
+IChatClient chatClient = innerClient
+    .AsBuilder()
+    .UseFunctionInvocation()
+    .UseOpenTelemetry(sourceName: "Experimental.Microsoft.Extensions.AI")
+    .Build();
+```
+
+The `sourceName` parameter determines the `ActivitySource` name used for the emitted spans. If you use [Model Context Protocol (MCP)](https://learn.microsoft.com/dotnet/ai/model-context-protocol) tools, the MCP client also emits its own spans under the `"ModelContextProtocol"` source.
+
+### Step 2: Register the AI source and meter names
+
+Add the AI and MCP source/meter names alongside the Teams SDK ones in your OpenTelemetry configuration:
+
+```csharp
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing =>
+    {
+        // Teams SDK sources
+        tracing.AddSource(new[] { CoreTelemetryNames.ActivitySourceName,
+                                  TeamsBotApplicationTelemetry.ActivitySourceName });
+        // AI / MCP sources
+        tracing.AddSource(new[] { "Experimental.Microsoft.Extensions.AI",
+                                  "ModelContextProtocol" });
+    })
+    .WithMetrics(metrics =>
+    {
+        // Teams SDK meters
+        metrics.AddMeter(new[] { CoreTelemetryNames.MeterName,
+                                 TeamsBotApplicationTelemetry.MeterName });
+        // AI / MCP meters
+        metrics.AddMeter(new[] { "Experimental.Microsoft.Extensions.AI",
+                                 "ModelContextProtocol" });
+    });
+```
+
+With both steps in place, your traces show the full chain — from the inbound Teams message, through turn and handler processing, into AI model chat completions and tool calls, and back out through the Bot Service response:
+
+![Application Insights end-to-end transaction showing an AI bot turn — handler, orchestrate_tools, two gpt-5.4-mini chat completions, an MCP microsoft_docs_search tool call, and the outbound Bot Service response](/screenshots/appinsights-aibot-trace.png)
+
+For a complete working example, see the [AIBotWithOTel sample](https://github.com/microsoft/teams-agent-accelerator-templates/tree/main/dotnet/AIBotWithOTel).
+
+## Resource Configuration
+
+[Resource attributes](https://learn.microsoft.com/azure/azure-monitor/app/opentelemetry-configuration#set-the-cloud-role-name-and-the-cloud-role-instance) identify your service in the backend. At a minimum, set `service.name` so your bot is distinguishable in Application Map and trace views:
+
+```csharp
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(r => r
+        .AddService(
+            serviceName: "my-teams-bot",
+            serviceVersion: "1.0.0",
+            serviceNamespace: "Contoso.Agents"));
+```
+
+For production, also consider setting `deployment.environment` so you can filter between staging and production:
+
+```csharp
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(r => r
+        .AddService(serviceName: "my-teams-bot", serviceVersion: "1.0.0")
+        .AddAttributes(new Dictionary<string, object>
+        {
+            ["deployment.environment"] = builder.Environment.EnvironmentName,
+            ["service.namespace"] = "Contoso.Agents",
+        }));
+```
+
+If multiple bots share the same Application Insights resource, `service.name` and `service.namespace` are what separate them in the [Application Map](https://learn.microsoft.com/azure/azure-monitor/app/app-map).
+
+> **Note:** When using .NET Aspire, the AppHost automatically sets `service.name` from the project name passed to `AddProject("name")`, so you typically don't need to configure it manually.
+
+## Full Example with Aspire
+
+The [OTelBotWithAspire sample](https://github.com/microsoft/teams-agent-accelerator-templates/tree/main/dotnet/OTelBotWithAspire) is a ready-to-run Aspire solution with three projects:
+
+| Project | Purpose |
+| --- | --- |
+| `OTelBot` | The Teams bot — `Program.cs` is 18 lines |
+| `OTelBotWithAspire.ServiceDefaults` | OpenTelemetry, health checks, and service discovery |
+| `OTelBotWithAspire.AppHost` | Aspire orchestrator that launches the bot with the dashboard |
+
+The bot's `Program.cs` stays minimal because all observability is configured in service defaults:
+
+```csharp
+using Microsoft.Teams.Apps;
+
+WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+builder.AddServiceDefaults();
+builder.Services.AddTeamsBotApplication();
+WebApplication app = builder.Build();
+
+TeamsBotApplication bot = app.UseTeamsBotApplication();
+
+bot.OnMessage(async (ctx, ct) =>
+{
+    string? message = ctx.Activity.TextWithoutMentions;
+    await ctx.SendActivityAsync($"Echo: {message}", ct);
+});
+
+app.MapDefaultEndpoints();
+app.Run();
+```
+
+`AddServiceDefaults()` configures OpenTelemetry (traces, metrics, logs), health checks, service discovery, and resilience — all through the standard [.NET Aspire service defaults](https://learn.microsoft.com/dotnet/aspire/fundamentals/service-defaults) pattern. The service defaults register the Teams SDK's `ActivitySource` and `Meter` names, and conditionally enable OTLP and Azure Monitor exporters based on environment variables.
+
+## Full Example (Standalone)
+
+If you are not using .NET Aspire, here is a standalone `Program.cs` that wires up a Teams bot with OpenTelemetry tracing, metrics, and logs — exporting to OTLP and optionally to Azure Monitor:
+
+```csharp
+using Azure.Monitor.OpenTelemetry.AspNetCore;
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Diagnostics;
+using Microsoft.Teams.Core.Diagnostics;
+using OpenTelemetry.Resources;
+
+WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddTeamsBotApplication();
+
+// --- OpenTelemetry ---
+var otel = builder.Services.AddOpenTelemetry()
+    .ConfigureResource(r => r
+        .AddService(serviceName: "my-teams-bot", serviceVersion: "1.0.0")
+        .AddAttributes(new Dictionary<string, object>
+        {
+            ["deployment.environment"] = builder.Environment.EnvironmentName,
+        }));
+
+// Azure Monitor (requires APPLICATIONINSIGHTS_CONNECTION_STRING env var)
+if (!string.IsNullOrEmpty(builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"]))
+{
+    otel.UseAzureMonitor();
+}
+
+// Traces: Teams SDK sources + auto-instrumentation + OTLP export
+otel.WithTracing(tracing =>
+{
+    tracing.AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation();
+    tracing.AddSource(new[] { CoreTelemetryNames.ActivitySourceName,
+                              TeamsBotApplicationTelemetry.ActivitySourceName });
+    tracing.AddOtlpExporter();
+});
+
+// Metrics: Teams SDK meters + auto-instrumentation + OTLP export
+otel.WithMetrics(metrics =>
+{
+    metrics.AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation()
+        .AddRuntimeInstrumentation();
+    metrics.AddMeter(new[] { CoreTelemetryNames.MeterName,
+                             TeamsBotApplicationTelemetry.MeterName });
+    metrics.AddOtlpExporter();
+});
+
+// Logs: correlated to active traces
+builder.Logging.AddOpenTelemetry(logging =>
+{
+    logging.IncludeFormattedMessage = true;
+    logging.IncludeScopes = true;
+});
+
+// --- App ---
+WebApplication app = builder.Build();
+
+TeamsBotApplication bot = app.UseTeamsBotApplication();
+
+bot.OnMessage(async (ctx, ct) =>
+{
+    string? message = ctx.Activity.TextWithoutMentions;
+    await ctx.SendActivityAsync($"Echo: {message}", ct);
+});
+
+app.Run();
+```
+
+Run with a local OTLP collector (Aspire Dashboard or Grafana LGTM) to see traces, metrics, and correlated logs for every turn. Set `APPLICATIONINSIGHTS_CONNECTION_STRING` to additionally export to Azure Monitor.
+
+## Next Steps
+
+- [OTelBotWithAspire sample](https://github.com/microsoft/teams-agent-accelerator-templates/tree/main/dotnet/OTelBotWithAspire) — ready-to-run Aspire solution with the Aspire Dashboard
+- [.NET observability with OpenTelemetry](https://learn.microsoft.com/dotnet/core/diagnostics/observability-with-otel) — conceptual overview of the three pillars
+- [Configure Azure Monitor OpenTelemetry](https://learn.microsoft.com/azure/azure-monitor/app/opentelemetry-configuration) — sampling, resource attributes, and advanced configuration
+- [OpenTelemetry .NET documentation](https://opentelemetry.io/docs/languages/dotnet/) — upstream reference
+
+---
+
+### PAGE: Receiving Inline Images
+
+# Receiving Inline Images
+
+When a user pastes an image into the Teams compose box, the image does not arrive inside `Activity.Text`. Teams sends it as an attachment on the inbound message activity, and `context.Files` lists it alongside the files the user attached, as a lazy handle you can download from in the same way as an attached file.
+
+:::info[Coming Soon]
+Receiving inline images through `context.Files` is planned for the next SDK release, version 2.2.0.
+:::
+
+## List pasted images
+
+Each listed file has an `AttachmentStyle` that says how it was attached: `AttachmentStyle.InlineImage` for an image pasted into the message, or `AttachmentStyle.File` for a file attachment. Pass the style as a filter to `ListAsync()` or `FirstAsync()` to get only pasted images:
+
+```csharp
+using Microsoft.Teams.Apps.Files;
+
+teamsApp.OnMessage(async (context, cancellationToken) =>
+{
+    IList pastedImages = await context.Files.ListAsync(
+        new FileListOptions { AttachmentStyle = AttachmentStyle.InlineImage },
+        cancellationToken);
+
+    if (pastedImages.Count == 0)
+    {
+        await context.ReplyAsync("Paste an image into your message and I will read it.", cancellationToken);
+        return;
+    }
+
+    await context.ReplyAsync($"You pasted {pastedImages.Count} image(s).", cancellationToken);
+});
+```
+
+Without a filter, both styles are returned in the order they arrived. Like any listing, this makes no network requests.
+
+## Download a pasted image
+
+A pasted image downloads through the same methods as an attached file, described in [Receiving Files](#receiving-files):
+
+```csharp
+IncomingFile? image = await context.Files.FirstAsync(
+    new FileListOptions { AttachmentStyle = AttachmentStyle.InlineImage },
+    cancellationToken);
+
+if (image is not null)
+{
+    DownloadedFile downloaded = await image.DownloadAsync(cancellationToken);
+    string base64 = Convert.ToBase64String(downloaded.Bytes);
+
+    // Pass downloaded.Bytes or base64, with downloaded.ContentType, to your image-processing or model client.
+}
+```
